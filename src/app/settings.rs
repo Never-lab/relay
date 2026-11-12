@@ -24,11 +24,23 @@ impl App {
                         .button("Keyboard shortcuts")
                         .on_hover_text("F1")
                         .clicked();
+                    if let Some(commit) = option_env!("RELAY_COMMIT") {
+                        ui.hyperlink_to(
+                            RichText::new(commit).size(12.),
+                            format!("{}/commit/{commit}", env!("CARGO_PKG_REPOSITORY")),
+                        )
+                        .on_hover_text("View commit on GitHub");
+                        ui.label(RichText::new("·").size(12.).color(colors.muted));
+                    }
                     let version = version();
                     if ui
                         .add(
-                            egui::Label::new(RichText::new(&version).size(12.).color(colors.muted))
-                                .sense(Sense::click()),
+                            egui::Label::new(
+                                RichText::new(format!("Relay {}", env!("CARGO_PKG_VERSION")))
+                                    .size(12.)
+                                    .color(colors.muted),
+                            )
+                            .sense(Sense::click()),
                         )
                         .on_hover_text("Click to copy")
                         .clicked()

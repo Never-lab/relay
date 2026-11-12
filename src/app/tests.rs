@@ -1639,6 +1639,64 @@ fn the_version_names_the_release() {
 }
 
 #[test]
+fn the_settings_commit_opens_its_github_page() {
+    let Some(commit) = option_env!("RELAY_COMMIT") else {
+        return;
+    };
+    let ctx = egui::Context::default();
+    let mut app = test_app(&ctx);
+    app.modal = Modal::Settings;
+    let mut frame = |events| {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(1200., 800.),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ctx| app.settings(ctx),
+        )
+    };
+    for _ in 0..3 {
+        frame(vec![]);
+    }
+    let output = frame(vec![]);
+    let pos = output
+        .shapes
+        .iter()
+        .find_map(|clipped| match &clipped.shape {
+            egui::Shape::Text(text) if text.galley.text() == commit => {
+                Some(text.visual_bounding_rect().center())
+            }
+            _ => None,
+        })
+        .expect("the commit link is visible in Settings");
+    frame(vec![egui::Event::PointerMoved(pos)]);
+    let mut output = output;
+    for pressed in [true, false] {
+        output = frame(vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+    }
+    let expected = format!("https://github.com/nurlennart/relay/commit/{commit}");
+    assert!(
+        output.platform_output.commands.iter().any(|command| {
+            matches!(command, egui::OutputCommand::OpenUrl(url) if url.url == expected)
+        }),
+        "click at {pos:?}: {:?}",
+        output.platform_output.commands
+    );
+}
+
+#[test]
 fn shared_library_syncs_silently() {
     let ctx = egui::Context::default();
     let mut app = test_app(&ctx);
