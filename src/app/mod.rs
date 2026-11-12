@@ -282,6 +282,7 @@ impl App {
             saved,
         );
         app.state_path = Some(state_path);
+        app.forget_removed();
         if let Some(error) = font_error {
             app.error = Some(error);
         }
@@ -1074,9 +1075,13 @@ impl App {
         self.persist(next)
     }
 
-    /// Detaches open sessions from connections that left the open library, so a connection
-    /// added later with the same ID is not mistaken for theirs.
+    /// Prunes recent IDs and detaches open sessions from connections that left the open
+    /// library, so a connection added later with the same ID is not mistaken for theirs.
     fn forget_removed(&mut self) {
+        if !self.storage_ok {
+            return;
+        }
+        let recents_changed = self.state.prune_recent(&self.location, &self.connections);
         let library = state::Library::of(&self.location);
         let mut changed = false;
         for s in &mut self.sessions {
@@ -1090,6 +1095,8 @@ impl App {
         }
         if changed {
             self.remember_tabs();
+        } else if recents_changed {
+            self.save_state();
         }
     }
 

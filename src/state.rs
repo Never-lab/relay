@@ -204,6 +204,20 @@ impl State {
         list.insert(0, id);
         list.truncate(RECENT);
     }
+
+    /// Drops recent IDs absent from a successfully loaded library, reporting any change.
+    pub fn prune_recent(
+        &mut self,
+        location: &Location,
+        connections: &[crate::model::Connection],
+    ) -> bool {
+        let Some(list) = self.recent.get_mut(&key(location)) else {
+            return false;
+        };
+        let before = list.len();
+        list.retain(|id| connections.iter().any(|c| c.id == *id));
+        list.len() != before
+    }
 }
 
 impl Library {

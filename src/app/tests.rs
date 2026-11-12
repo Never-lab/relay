@@ -956,6 +956,102 @@ fn recent_filter_lists_opened_profiles_newest_first() {
 }
 
 #[test]
+fn recent_cleanup_saves_only_changes_in_the_loaded_library() {
+    let ctx = egui::Context::default();
+    let mut app = test_app(&ctx);
+    let path = std::env::temp_dir().join(model::temp_name("relay-recent-state.json"));
+    app.state_path = Some(path.clone());
+    let team = database::Location::Sqlite(PathBuf::from("team.sqlite"));
+    for id in [1, 99, 3] {
+        app.state.note_recent(&app.location, id);
+    }
+    app.state.note_recent(&team, 99);
+    app.forget_removed();
+    assert_eq!(app.state.recent(&app.location), [3, 1]);
+    assert_eq!(app.state.recent(&team), [99]);
+    assert_eq!(state::load(&path), app.state);
+
+    std::fs::remove_file(&path).unwrap();
+    app.forget_removed();
+    assert!(!path.exists(), "unchanged history is not saved again");
+
+    app.set_connections(vec![]);
+    app.forget_removed();
+    assert!(app.state.recent(&app.location).is_empty());
+    assert_eq!(state::load(&path), app.state);
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn failed_initial_load_preserves_recent_history() {
+    let ctx = egui::Context::default();
+    let original = test_app(&ctx);
+    let mut saved = state::State::default();
+    saved.note_recent(&original.location, 99);
+    let mut app = App::with(
+        ctx,
+        original.path,
+        Err("Cannot read the library".into()),
+        None,
+        None,
+        None,
+        saved.clone(),
+    );
+    app.forget_removed();
+    assert_eq!(app.state, saved);
+}
+
+#[test]
+fn recent_history_is_pruned_only_after_successful_library_operations() {
+    let ctx = egui::Context::default();
+    for operation in ["save", "refresh", "sync"] {
+        for success in [false, true] {
+            let mut app = test_app(&ctx);
+            let path = std::env::temp_dir().join(model::temp_name("relay-recent-state.json"));
+            app.state_path = Some(path.clone());
+            app.location = database::Location::Sqlite(PathBuf::from("team.sqlite"));
+            for id in [1, 2, 3] {
+                app.state.note_recent(&app.location, id);
+            }
+            app.state.save(&path).unwrap();
+            let result = if success {
+                Ok(database::Snapshot {
+                    connections: app
+                        .connections
+                        .iter()
+                        .filter(|c| c.id != 2)
+                        .cloned()
+                        .collect(),
+                    revision: app.revision + 1,
+                })
+            } else {
+                Err("The library operation failed".into())
+            };
+            if operation == "sync" {
+                let (tx, rx) = std::sync::mpsc::channel();
+                tx.send(result.map(Some)).unwrap();
+                app.sync = Some(rx);
+                app.sync_library(&ctx);
+            } else {
+                let (tx, rx) = std::sync::mpsc::channel();
+                tx.send(result).unwrap();
+                app.pending = Some(rx);
+                app.pending_save = operation == "save";
+                app.poll_storage();
+            }
+            let expected: &[u64] = if success { &[3, 1] } else { &[3, 2, 1] };
+            assert_eq!(
+                app.state.recent(&app.location),
+                expected,
+                "{operation}: {success}"
+            );
+            assert_eq!(state::load(&path), app.state, "{operation}: {success}");
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+}
+
+#[test]
 fn narrow_tables_drop_columns_and_fit() {
     let kinds = |width| -> Vec<_> { table_columns(width).into_iter().map(|c| c.0).collect() };
     assert!(kinds(900.).contains(&Column::Group));
