@@ -455,10 +455,7 @@ impl RdpClient {
             egui::Rect::from_min_max(egui::pos2(0., 0.), egui::pos2(1., 1.)),
             egui::Color32::WHITE,
         );
-        // The remote pointer is part of the picture.
-        if response.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::None);
-        }
+        desktop_cursor(&response);
 
         let mut commands = vec![];
         let (events, modifiers) = ui.input(|i| (i.events.clone(), i.modifiers));
@@ -544,6 +541,22 @@ impl RdpClient {
     }
 }
 
+/// The remote pointer is part of the picture. Reassert native visibility when the
+/// window is activated: both egui-winit and winit cache cursor state, while the OS
+/// can restore the local cursor during activation. Toggling forces a native update.
+fn desktop_cursor(response: &egui::Response) {
+    if !response.hovered() {
+        return;
+    }
+    let ctx = &response.ctx;
+    ctx.set_cursor_icon(egui::CursorIcon::None);
+    let activated = ctx.input(|i| i.events.contains(&egui::Event::WindowFocused(true)));
+    if activated || response.clicked() {
+        ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
+    }
+    ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(false));
+}
+
 /// The size of `size` points in physical pixels.
 fn physical_size(size: egui::Vec2, ppp: f32) -> [u16; 2] {
     [size.x, size.y].map(|v| (v * ppp).round().clamp(0., f32::from(u16::MAX)) as u16)
@@ -608,6 +621,57 @@ fn trust(ui: &mut egui::Ui, certificate: &Untrusted) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_cursor_is_rehidden_on_activation_and_restored_outside() {
+        let ctx = egui::Context::default();
+        let draw = |events| {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400., 300.),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let (_, response) = ui.allocate_exact_size(
+                            egui::vec2(200., 150.),
+                            egui::Sense::click_and_drag(),
+                        );
+                        desktop_cursor(&response);
+                    });
+                },
+            )
+        };
+        // Establish the widget before testing hit detection.
+        let _ = draw(vec![]);
+        let at = egui::pos2(50., 50.);
+        let output = draw(vec![egui::Event::PointerMoved(at)]);
+        assert_eq!(output.platform_output.cursor_icon, egui::CursorIcon::None);
+        let output = draw(vec![egui::Event::WindowFocused(true)]);
+        let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
+        assert!(commands.windows(2).any(|pair| matches!(
+            pair,
+            [
+                egui::ViewportCommand::CursorVisible(true),
+                egui::ViewportCommand::CursorVisible(false)
+            ]
+        )));
+        let output = draw(vec![egui::Event::PointerMoved(egui::pos2(350., 250.))]);
+        assert_eq!(
+            output.platform_output.cursor_icon,
+            egui::CursorIcon::Default
+        );
+        assert!(
+            !output.viewport_output[&egui::ViewportId::ROOT]
+                .commands
+                .iter()
+                .any(|cmd| matches!(cmd, egui::ViewportCommand::CursorVisible(false)))
+        );
+    }
 
     #[test]
     fn only_unsupported_options_are_listed() {
