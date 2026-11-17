@@ -2591,6 +2591,7 @@ fn connection_editor_frame(
     ctx.run(
         egui::RawInput {
             screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, size)),
+            time: Some(ctx.input(|input| input.time) + 0.1),
             events,
             ..Default::default()
         },
@@ -2622,11 +2623,18 @@ fn connection_editor_keeps_header_and_actions_visible_across_themes_and_sizes() 
                 c.ssh.forwards = "L8080:localhost:80".into();
                 c.vnc.view_only = true;
                 app.edit(c);
-                for frame in 0..12 {
-                    if frame == 8 {
+                let last = match protocol {
+                    Protocol::Rdp => "Fixed resolution",
+                    Protocol::Ssh => "Port forwards (optional)",
+                    Protocol::Vnc => "View only",
+                };
+                let mut last_visible = false;
+                // Sweep the form: backend-specific notices can follow its last control.
+                for frame in 0..48 {
+                    if frame == 44 {
                         app.editor_error = "Enter a hostname, IPv4 address, or bare IPv6 address (without a port).".into();
                     }
-                    if frame == 9 {
+                    if frame == 45 {
                         app.editor_error = "Someone else changed this connection while you edited. Save again to replace their values with yours, or Cancel to keep theirs.".into();
                     }
                     let output = connection_editor_frame(
@@ -2638,7 +2646,7 @@ fn connection_editor_keeps_header_and_actions_visible_across_themes_and_sizes() 
                                 egui::Event::PointerMoved(egui::pos2(size.x / 2., size.y / 2.)),
                                 egui::Event::MouseWheel {
                                     unit: egui::MouseWheelUnit::Point,
-                                    delta: Vec2::new(0., -1000.),
+                                    delta: Vec2::new(0., -32.),
                                     modifiers: egui::Modifiers::NONE,
                                 },
                             ]
@@ -2649,15 +2657,12 @@ fn connection_editor_keeps_header_and_actions_visible_across_themes_and_sizes() 
                     if frame < 2 {
                         continue;
                     }
-                    if frame == 7 {
-                        let last = match protocol {
-                            Protocol::Rdp => "Fixed resolution",
-                            Protocol::Ssh => "Port forwards (optional)",
-                            Protocol::Vnc => "View only",
-                        };
-                        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
-                            egui::Shape::Text(text) if text.galley.text() == last && shape.clip_rect.contains_rect(text.visual_bounding_rect()))),
-                            "{theme:?} {protocol:?} {size:?}: last setting unreachable");
+                    if frame < 44 {
+                        last_visible |= output.shapes.iter().any(|shape| {
+                            matches!(&shape.shape,
+                            egui::Shape::Text(text) if text.galley.text() == last
+                                && shape.clip_rect.contains_rect(text.visual_bounding_rect()))
+                        });
                     }
                     let screen = Rect::from_min_size(egui::Pos2::ZERO, size);
                     for label in [
@@ -2684,6 +2689,10 @@ fn connection_editor_keeps_header_and_actions_visible_across_themes_and_sizes() 
                         "{theme:?} {protocol:?} {size:?}: modal {rect:?}"
                     );
                 }
+                assert!(
+                    last_visible,
+                    "{theme:?} {protocol:?} {size:?}: last setting unreachable"
+                );
             }
         }
     }
