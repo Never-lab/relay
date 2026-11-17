@@ -497,6 +497,10 @@ pub struct Browser {
     watcher: Option<std_mpsc::Sender<edit::Watch>>,
     /// Library connection id for remembering login passwords; `0` for ad-hoc.
     connection_id: u64,
+    /// Username from the connection profile, stored with a remembered password.
+    connection_username: String,
+    /// Login to save once ssh has accepted it (`Ready`); cleared on failure.
+    pending_remember: Option<secret::ConnectionLogin>,
     pub status: Status,
     /// The folder shown; empty until the first listing arrives.
     pub path: String,
@@ -548,6 +552,7 @@ impl Browser {
             Some(ctx),
             start,
             c.id,
+            c.username.clone(),
         )
     }
 
@@ -562,6 +567,7 @@ impl Browser {
             None,
             None,
             0,
+            String::new(),
         )
     }
 
@@ -576,6 +582,7 @@ impl Browser {
             None,
             None,
             0,
+            String::new(),
         )
     }
 
@@ -590,7 +597,7 @@ impl Browser {
             shown: Default::default(),
             progress: Default::default(),
         };
-        let mut browser = Self::with(commands, events, events_out, None, 0);
+        let mut browser = Self::with(commands, events, events_out, None, 0, String::new());
         browser.demo_inbox = Some(inbox);
         browser.status = Status::Ready;
         browser.path = path.into();
@@ -658,6 +665,7 @@ impl Browser {
         events_out: Events,
         start: Option<String>,
         connection_id: u64,
+        connection_username: String,
     ) -> Self {
         Self {
             commands,
@@ -665,6 +673,8 @@ impl Browser {
             events_out,
             watcher: None,
             connection_id,
+            connection_username,
+            pending_remember: None,
             status: Status::Connecting,
             path: String::new(),
             home: String::new(),
@@ -698,6 +708,7 @@ impl Browser {
         ctx: Option<egui::Context>,
         start: Option<String>,
         connection_id: u64,
+        connection_username: String,
     ) -> Self {
         let (commands, inbox) = mpsc::unbounded_channel();
         let (sender, events) = std_mpsc::channel();
@@ -719,7 +730,8 @@ impl Browser {
                     Err(e) => events.send(Event::Ended(format!("Cannot start SFTP: {e}"))),
                 }
             });
-        let mut browser = Self::with(commands, events, events_out, start, connection_id);
+        let mut browser =
+            Self::with(commands, events, events_out, start, connection_id, connection_username);
         if let Err(e) = spawned {
             browser.status = Status::Ended(format!("Cannot start SFTP: {e}"));
         }
@@ -754,11 +766,13 @@ impl Browser {
                 let can_remember = self.connection_id != 0
                     && request.kind == askpass::Kind::Secret
                     && askpass::is_login_password_prompt(&request.text);
+                let mut username = self.connection_username.clone();
                 let mut answer = String::new();
                 let mut remember = false;
                 if can_remember {
-                    secret::fill_connection_password(
+                    secret::fill_connection_login(
                         self.connection_id,
+                        &mut username,
                         &mut answer,
                         &mut remember,
                     );
@@ -778,6 +792,15 @@ impl Browser {
             Event::Ready { home } => {
                 self.status = Status::Ready;
                 self.prompts.clear();
+                if let Some(login) = self.pending_remember.take()
+                    && let Err(e) =
+                        secret::persist_connection_login(self.connection_id, &login, true)
+                {
+                    self.notice = Some((
+                        format!("Connected, but could not save the password: {e}"),
+                        Instant::now(),
+                    ));
+                }
                 self.home = home.clone();
                 let start = self.start.take().unwrap_or(home);
                 self.list(start);
@@ -890,6 +913,7 @@ impl Browser {
                 self.loading = false;
                 self.busy = 0;
                 self.prompts.clear();
+                self.pending_remember = None;
                 let ended = Failure::Error("The connection ended.".into());
                 for t in &mut self.transfers {
                     if !t.finished() {
@@ -1234,14 +1258,26 @@ impl Browser {
     pub fn answer(&mut self, id: u64, answer: Option<String>) {
         if let Some(index) = self.prompts.iter().position(|p| p.id == id) {
             let mut prompt = self.prompts.remove(index);
-            if prompt.can_remember
-                && let Some(password) = answer.as_ref()
-            {
-                let _ = secret::persist_connection_password(
-                    self.connection_id,
-                    password,
-                    prompt.remember,
-                );
+            if prompt.can_remember {
+                if prompt.remember {
+                    if let Some(password) = answer.as_ref() {
+                        self.pending_remember = Some(secret::ConnectionLogin {
+                            username: self.connection_username.clone(),
+                            password: password.clone(),
+                        });
+                    }
+                } else {
+                    self.pending_remember = None;
+                    let login = secret::ConnectionLogin {
+                        username: self.connection_username.clone(),
+                        password: String::new(),
+                    };
+                    if let Err(e) =
+                        secret::persist_connection_login(self.connection_id, &login, false)
+                    {
+                        self.error = Some(format!("Cannot remove saved password: {e}"));
+                    }
+                }
             }
             if let Some(reply) = prompt.reply.take() {
                 let _ = reply.send(answer);

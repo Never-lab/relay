@@ -1053,6 +1053,10 @@ impl App {
     fn delete_connections(&mut self, ids: &[u64]) -> bool {
         let last_match = !self.query.is_empty()
             && (self.filtered().iter()).all(|&i| ids.contains(&self.connections[i].id));
+        let removed: Vec<_> = (self.connections.iter())
+            .filter(|c| ids.contains(&c.id))
+            .cloned()
+            .collect();
         let next = (self.connections.iter())
             .filter(|c| !ids.contains(&c.id))
             .cloned()
@@ -1060,8 +1064,16 @@ impl App {
         if !self.persist(next) {
             return false;
         }
-        for &id in ids {
-            let _ = secret::forget_connection_password(id);
+        let mut forget_error = None;
+        for c in &removed {
+            if let Err(e) = self.forget_saved_password(c) {
+                forget_error = Some(e);
+            }
+        }
+        if let Some(e) = forget_error {
+            self.error = Some(format!(
+                "Removed the connection, but could not clear the saved password: {e}"
+            ));
         }
         if last_match {
             self.query.clear();
@@ -1080,7 +1092,7 @@ impl App {
         if c.protocol == Protocol::Rdp {
             return rdp::forget_credentials(&c.host);
         }
-        let had = secret::load_connection_password(c.id).is_some();
+        let had = secret::load_connection_login(c.id).is_some();
         secret::forget_connection_password(c.id)?;
         Ok(had)
     }

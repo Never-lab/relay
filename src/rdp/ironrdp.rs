@@ -92,12 +92,16 @@ enum Stage {
     Trust {
         credentials: Credentials,
         certificate: Untrusted,
+        /// Save the login after the server accepts it.
+        remember: bool,
     },
     Running {
         worker: Worker,
         credentials: Credentials,
         connected: bool,
         reconnecting: bool,
+        /// Save the login after the server accepts it.
+        remember: bool,
     },
     Ended(String),
 }
@@ -141,7 +145,12 @@ impl RdpClient {
             password: String::new(),
         };
         let mut remember = false;
-        secret::fill_connection_password(connection.id, &mut credentials.password, &mut remember);
+        secret::fill_connection_login(
+            connection.id,
+            &mut credentials.username,
+            &mut credentials.password,
+            &mut remember,
+        );
         Ok(Self {
             connection: connection.clone(),
             ctx,
@@ -211,63 +220,89 @@ impl RdpClient {
     /// Applies what the connection reported since the last frame.
     pub fn poll(&mut self) {
         let connection_id = self.connection.id;
-        let Stage::Running {
-            worker,
-            credentials,
-            connected,
-            reconnecting,
-        } = &mut self.stage
-        else {
-            return;
-        };
-        let copied = worker.copied.lock().ok().and_then(|mut c| c.take());
-        if let Some(text) = copied {
-            self.ctx.copy_text(text.clone());
-            self.copied = Some(text);
-        }
         let mut next = None;
-        for event in worker.events() {
-            match event {
-                Event::Connected => (*connected, *reconnecting) = (true, false),
-                Event::Reconnecting => *reconnecting = true,
-                Event::FixedResolution => {
-                    self.warning = Some(
-                        "The remote computer cannot change its resolution, so the desktop is \
-                         scaled to the tab."
-                            .into(),
-                    );
-                }
-                Event::Ended(outcome) => {
-                    next = Some(match outcome {
-                        Outcome::SignIn(error) => {
-                            let mut credentials = Credentials {
-                                password: String::new(),
-                                ..credentials.clone()
+        let mut save_warning = None;
+        let mut resolution_warning = false;
+        {
+            let Stage::Running {
+                worker,
+                credentials,
+                connected,
+                reconnecting,
+                remember,
+            } = &mut self.stage
+            else {
+                return;
+            };
+            let copied = worker.copied.lock().ok().and_then(|mut c| c.take());
+            if let Some(text) = copied {
+                self.ctx.copy_text(text.clone());
+                self.copied = Some(text);
+            }
+            for event in worker.events() {
+                match event {
+                    Event::Connected => {
+                        (*connected, *reconnecting) = (true, false);
+                        if *remember {
+                            let login = secret::ConnectionLogin {
+                                username: credentials.username.clone(),
+                                password: credentials.password.clone(),
                             };
-                            let mut remember = false;
-                            secret::fill_connection_password(
-                                connection_id,
-                                &mut credentials.password,
-                                &mut remember,
-                            );
-                            Stage::SignIn {
-                                credentials,
-                                error: Some(error),
-                                place_cursor: true,
-                                remember,
+                            if let Err(e) =
+                                secret::persist_connection_login(connection_id, &login, true)
+                            {
+                                save_warning = Some(format!(
+                                    "Connected, but could not save the password: {e}"
+                                ));
                             }
                         }
-                        Outcome::Certificate(certificate) => Stage::Trust {
-                            credentials: credentials.clone(),
-                            certificate,
-                        },
-                        Outcome::Closed(reason) => {
-                            Stage::Ended(format!("The remote session ended: {reason}."))
-                        }
-                        Outcome::Failed(error) => Stage::Ended(error),
-                    });
+                    }
+                    Event::Reconnecting => *reconnecting = true,
+                    Event::FixedResolution => resolution_warning = true,
+                    Event::Ended(outcome) => {
+                        next = Some(match outcome {
+                            Outcome::SignIn(error) => {
+                                let mut credentials = Credentials {
+                                    password: String::new(),
+                                    ..credentials.clone()
+                                };
+                                let mut remember = false;
+                                secret::fill_connection_login(
+                                    connection_id,
+                                    &mut credentials.username,
+                                    &mut credentials.password,
+                                    &mut remember,
+                                );
+                                Stage::SignIn {
+                                    credentials,
+                                    error: Some(error),
+                                    place_cursor: true,
+                                    remember,
+                                }
+                            }
+                            Outcome::Certificate(certificate) => Stage::Trust {
+                                credentials: credentials.clone(),
+                                certificate,
+                                remember: *remember,
+                            },
+                            Outcome::Closed(reason) => {
+                                Stage::Ended(format!("The remote session ended: {reason}."))
+                            }
+                            Outcome::Failed(error) => Stage::Ended(error),
+                        });
+                    }
                 }
             }
+        }
+        if resolution_warning {
+            self.warning = Some(
+                "The remote computer cannot change its resolution, so the desktop is \
+                 scaled to the tab."
+                    .into(),
+            );
+        }
+        if let Some(warning) = save_warning {
+            self.warning = Some(warning);
         }
         if let Some(next) = next {
             self.stage = next;
@@ -376,21 +411,32 @@ impl RdpClient {
                     "Relay keeps the password only while this session is open.",
                     can_remember.then_some(remember),
                 ) {
-                    let _ = secret::persist_connection_password(
-                        self.connection.id,
-                        &credentials.password,
-                        can_remember && *remember,
-                    );
-                    start = Some(credentials.clone());
+                    let remember = can_remember && *remember;
+                    if can_remember && !remember {
+                        let login = secret::ConnectionLogin {
+                            username: credentials.username.clone(),
+                            password: credentials.password.clone(),
+                        };
+                        if let Err(e) =
+                            secret::persist_connection_login(self.connection.id, &login, false)
+                        {
+                            *error = Some(format!("Cannot remove saved password: {e}"));
+                        } else {
+                            start = Some((credentials.clone(), false));
+                        }
+                    } else {
+                        start = Some((credentials.clone(), remember));
+                    }
                 }
             }
             Stage::Trust {
                 credentials,
                 certificate,
+                remember,
             } => match trust(ui, certificate) {
                 Some(true) => {
                     connection::trust(certificate);
-                    start = Some(credentials.clone());
+                    start = Some((credentials.clone(), *remember));
                 }
                 Some(false) => {
                     self.stage = Stage::Ended(format!(
@@ -406,14 +452,14 @@ impl RdpClient {
             Stage::Running { .. } => self.desktop(ui, rect, focus),
             Stage::Ended(_) => {}
         }
-        if let Some(credentials) = start {
-            self.start(credentials);
+        if let Some((credentials, remember)) = start {
+            self.start(credentials, remember);
         }
         rect
     }
 
     /// Starts connecting with `credentials` at the tab's current size.
-    fn start(&mut self, credentials: Credentials) {
+    fn start(&mut self, credentials: Credentials, remember: bool) {
         let options = &self.connection.rdp;
         let (area, scale) = self.area.unwrap_or(([1280, 800], 100));
         let size = match options.display {
@@ -440,6 +486,7 @@ impl RdpClient {
                 credentials,
                 connected: false,
                 reconnecting: false,
+                remember,
             },
             Err(error) => Stage::Ended(error),
         };

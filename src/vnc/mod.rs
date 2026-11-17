@@ -43,6 +43,8 @@ enum Stage {
         credentials: Option<Credentials>,
         connected: bool,
         reconnecting: bool,
+        /// Save the login after the server accepts it.
+        remember: bool,
     },
     Ended(String),
 }
@@ -75,6 +77,8 @@ pub struct VncClient {
     copied: Option<String>,
     /// Whether the tab is on screen, shared with each connection.
     shown: Arc<AtomicBool>,
+    /// A non-fatal problem to show above the session, such as a failed password save.
+    warning: Option<String>,
 }
 
 impl VncClient {
@@ -93,8 +97,9 @@ impl VncClient {
             focus_requested: false,
             copied: None,
             shown: Arc::new(AtomicBool::new(true)),
+            warning: None,
         };
-        client.start(None);
+        client.start(None, false);
         client
     }
 
@@ -129,52 +134,72 @@ impl VncClient {
     pub fn poll(&mut self) {
         let connection_id = self.connection.id;
         let connection_username = self.connection.username.clone();
-        let Stage::Running {
-            worker,
-            credentials,
-            connected,
-            reconnecting,
-        } = &mut self.stage
-        else {
-            return;
-        };
-        let copied = worker.copied.lock().ok().and_then(|mut c| c.take());
-        if let Some(text) = copied {
-            self.ctx.copy_text(text.clone());
-            self.copied = Some(text);
-        }
         let mut next = None;
-        for event in worker.events() {
-            match event {
-                Event::Connected { mac } => {
-                    (*connected, *reconnecting) = (true, false);
-                    self.translator.mac = mac;
+        let mut save_warning = None;
+        {
+            let Stage::Running {
+                worker,
+                credentials,
+                connected,
+                reconnecting,
+                remember,
+            } = &mut self.stage
+            else {
+                return;
+            };
+            let copied = worker.copied.lock().ok().and_then(|mut c| c.take());
+            if let Some(text) = copied {
+                self.ctx.copy_text(text.clone());
+                self.copied = Some(text);
+            }
+            for event in worker.events() {
+                match event {
+                    Event::Connected { mac } => {
+                        (*connected, *reconnecting) = (true, false);
+                        self.translator.mac = mac;
+                        if *remember
+                            && let Some(credentials) = credentials.as_ref()
+                        {
+                            let login = secret::ConnectionLogin {
+                                username: credentials.username.clone(),
+                                password: credentials.password.clone(),
+                            };
+                            if let Err(e) =
+                                secret::persist_connection_login(connection_id, &login, true)
+                            {
+                                save_warning = Some(format!(
+                                    "Connected, but could not save the password: {e}"
+                                ));
+                            }
+                        }
+                    }
+                    Event::Reconnecting => *reconnecting = true,
+                    Event::Ended(Outcome::SignIn(needs, error)) => {
+                        let username = match credentials {
+                            Some(c) if !c.username.is_empty() => c.username.clone(),
+                            _ => connection_username.clone(),
+                        };
+                        let mut credentials = Credentials {
+                            username,
+                            password: String::new(),
+                        };
+                        let mut remember = false;
+                        secret::fill_connection_login(
+                            connection_id,
+                            &mut credentials.username,
+                            &mut credentials.password,
+                            &mut remember,
+                        );
+                        next = Some(Stage::SignIn {
+                            needs,
+                            credentials,
+                            error,
+                            place_cursor: true,
+                            remember,
+                        });
+                    }
+                    Event::Ended(Outcome::Failed(error)) => next = Some(Stage::Ended(error)),
                 }
-                Event::Reconnecting => *reconnecting = true,
-                Event::Ended(Outcome::SignIn(needs, error)) => {
-                    let username = match credentials {
-                        Some(c) if !c.username.is_empty() => c.username.clone(),
-                        _ => connection_username.clone(),
-                    };
-                    let mut credentials = Credentials {
-                        username,
-                        password: String::new(),
-                    };
-                    let mut remember = false;
-                    secret::fill_connection_password(
-                        connection_id,
-                        &mut credentials.password,
-                        &mut remember,
-                    );
-                    next = Some(Stage::SignIn {
-                        needs,
-                        credentials,
-                        error,
-                        place_cursor: true,
-                        remember,
-                    });
-                }
-                Event::Ended(Outcome::Failed(error)) => next = Some(Stage::Ended(error)),
             }
         }
         if let Some(next) = next {
@@ -184,6 +209,9 @@ impl VncClient {
             self.focused = false;
             self.full_screen = false;
             self.translator = input::Translator::default();
+        }
+        if let Some(warning) = save_warning {
+            self.warning = Some(warning);
         }
     }
 
@@ -283,12 +311,22 @@ impl VncClient {
                     note,
                     can_remember.then_some(remember),
                 ) {
-                    let _ = secret::persist_connection_password(
-                        self.connection.id,
-                        &credentials.password,
-                        can_remember && *remember,
-                    );
-                    start = Some(credentials.clone());
+                    let remember = can_remember && *remember;
+                    if can_remember && !remember {
+                        let login = secret::ConnectionLogin {
+                            username: credentials.username.clone(),
+                            password: credentials.password.clone(),
+                        };
+                        if let Err(e) =
+                            secret::persist_connection_login(self.connection.id, &login, false)
+                        {
+                            *error = Some(format!("Cannot remove saved password: {e}"));
+                        } else {
+                            start = Some((credentials.clone(), false));
+                        }
+                    } else {
+                        start = Some((credentials.clone(), remember));
+                    }
                 }
             }
             Stage::Running {
@@ -297,14 +335,14 @@ impl VncClient {
             Stage::Running { .. } => self.desktop(ui, rect, focus),
             Stage::Ended(_) => {}
         }
-        if let Some(credentials) = start {
-            self.start(Some(credentials));
+        if let Some((credentials, remember)) = start {
+            self.start(Some(credentials), remember);
         }
         rect
     }
 
     /// Starts connecting, with `credentials` once the user has entered them.
-    fn start(&mut self, credentials: Option<Credentials>) {
+    fn start(&mut self, credentials: Option<Credentials>, remember: bool) {
         let options = &self.connection.vnc;
         let settings = Settings {
             host: self.connection.host.clone(),
@@ -313,15 +351,22 @@ impl VncClient {
             clipboard: options.clipboard,
             view_only: options.view_only,
         };
+        self.warning = None;
         self.stage = match Worker::start(settings, self.ctx.clone(), self.shown.clone()) {
             Ok(worker) => Stage::Running {
                 worker,
                 credentials,
                 connected: false,
                 reconnecting: false,
+                remember,
             },
             Err(error) => Stage::Ended(error),
         };
+    }
+
+    /// A non-fatal problem to show above the session.
+    pub fn display_warning(&self) -> Option<&str> {
+        self.warning.as_deref()
     }
 
     /// Draws the remote desktop into `rect` and forwards input to it, taking the keyboard if
