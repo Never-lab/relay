@@ -268,6 +268,39 @@ pub(super) fn outline_button(ui: &mut egui::Ui, label: &str, width: f32) -> egui
     )
 }
 
+/// Recovery actions shared by remote desktops and file browsers: reconnect, edit.
+pub(super) fn connection_recovery(ui: &mut egui::Ui, detail: &str, can_edit: bool) -> (bool, bool) {
+    ui.label(RichText::new("Not connected").size(15.).strong());
+    ui.add(egui::Label::new(if can_edit {
+        "Check the host, port and sign-in settings. Save any changes, then reconnect."
+    } else {
+        "Check that the host is reachable and your sign-in settings are correct, then reconnect."
+    }).wrap());
+    ui.add_space(8.);
+    let (mut reconnect, mut edit) = (false, false);
+    ui.horizontal_wrapped(|ui| {
+        reconnect = accent_button(ui, "Reconnect", 120.).clicked();
+        if can_edit {
+            edit = outline_button(ui, "Edit connection", 0.).clicked();
+        }
+    });
+    egui::ScrollArea::vertical()
+        .id_salt("connection-error-details")
+        .max_height(ui.available_height().clamp(0., 96.))
+        .show(ui, |ui| {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(detail)
+                        .size(12.)
+                        .color(theme::palette(ui.ctx()).muted),
+                )
+                .wrap()
+                .selectable(true),
+            );
+        });
+    (reconnect, edit)
+}
+
 /// A confirmation's buttons, right-aligned below a gap: Cancel, then `action`, filled red when
 /// it ends or removes something and in the accent color otherwise. Returns whether each was
 /// clicked; `action` only while `enabled`.

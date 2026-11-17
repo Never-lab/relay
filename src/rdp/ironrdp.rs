@@ -34,6 +34,8 @@ pub const FULL_SCREEN_IN_WINDOW: bool = true;
 pub const FULL_SCREEN_HELP: &str = "Ctrl+Alt+Enter or the bar at the top edge leaves full \
     screen\nCtrl+Alt+PgUp/PgDn switch tabs";
 
+pub const CONNECTING_HELP: &str = "Complete any sign-in or certificate prompt in this tab.";
+
 /// How signing in works, for the connection editor.
 pub const SIGN_IN_HELP: &str = "The tab asks for the password each time it connects and keeps it \
     only while the session is open.\nCertificates your system does not trust are shown for you \

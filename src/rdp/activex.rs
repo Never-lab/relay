@@ -727,6 +727,8 @@ pub const FULL_SCREEN_HELP: &str = "Ctrl+Alt+Break leaves and re-enters full scr
 /// The control can connect to a server's administrative session, as mstsc /admin does.
 pub const ADMIN_SESSIONS: bool = true;
 
+pub const CONNECTING_HELP: &str = "Complete the Windows sign-in prompt if one appears.";
+
 /// How signing in works, for the connection editor.
 pub const SIGN_IN_HELP: &str = "Windows asks for credentials; tick “Remember me” to skip the \
     prompt next time.\nWindows keeps them in Credential Manager. Relay never sees passwords.";

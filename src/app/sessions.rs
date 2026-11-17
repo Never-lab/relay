@@ -248,6 +248,25 @@ impl App {
             }
         }
         let s = &self.sessions[index];
+        if !s.local {
+            let kind = if s.browsing {
+                "SFTP"
+            } else {
+                s.connection.protocol.label()
+            };
+            let identity = format!("{kind} · {}", library::target_label(&s.connection));
+            ui.add(
+                egui::Label::new(
+                    RichText::new(&identity)
+                        .monospace()
+                        .size(12.)
+                        .color(colors.muted),
+                )
+                .truncate(),
+            )
+            .on_hover_text(&identity);
+            ui.add_space(4.);
+        }
         if s.browsing {
             self.files_pane(ui, index);
         } else if s.terminal.is_some() {
@@ -280,16 +299,17 @@ impl App {
         } else if let Some(error) = &s.error {
             let error = error.clone();
             ui.add_space(40.);
-            let reconnect = ui
+            let can_edit = self.saved_connection(index).is_some();
+            let (reconnect, edit) = ui
                 .vertical_centered(|ui| {
-                    ui.set_max_width(520.);
-                    ui.label(RichText::new(error).size(15.));
-                    ui.add_space(12.);
-                    accent_button(ui, "Reconnect", 120.).clicked()
+                    ui.set_width(ui.available_width().min(520.));
+                    connection_recovery(ui, &error, can_edit)
                 })
                 .inner;
             if reconnect {
                 self.reconnect(index);
+            } else if edit && let Some(connection) = self.saved_connection(index).cloned() {
+                self.edit(connection);
             }
         } else if !s.has_desktop() {
             ui.add_space(40.);
@@ -298,7 +318,11 @@ impl App {
                 ui.add_space(8.);
                 ui.heading("Opening your session…");
                 ui.label(
-                    RichText::new("Complete any Windows authentication prompt to continue.")
+                    RichText::new(match s.connection.protocol {
+                        Protocol::Rdp => rdp::CONNECTING_HELP,
+                        Protocol::Vnc => "Enter a password in this tab if the server asks for one.",
+                        Protocol::Ssh => "Starting SSH with your configured client, keys and agent.",
+                    })
                         .color(colors.muted),
                 );
                 let patience = Duration::from_secs(20);
@@ -306,7 +330,7 @@ impl App {
                     // Nothing else wakes the window when the note becomes due.
                     Some(left) => ui.ctx().request_repaint_after(left),
                     None => {
-                        ui.label("Waiting for the Windows RDP control to initialize.");
+                        ui.add(egui::Label::new("Still connecting. Check that the host is reachable, or close this tab to cancel.").wrap());
                     }
                 }
             });

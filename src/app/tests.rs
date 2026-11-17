@@ -574,16 +574,185 @@ fn tabs_take_saved_settings_only_from_their_own_library() {
     app.restore_tabs();
     assert_eq!(app.current_settings(0).host, "elsewhere.example");
     assert_eq!(app.current_settings(1).host, "alpha.example");
+    assert!(app.saved_connection(0).is_none());
+    assert_eq!(app.saved_connection(1).unwrap().host, "alpha.example");
 
     // Once Alpha is deleted, a new connection that reuses its ID is not its tab's.
     app.connections.remove(0);
     app.forget_removed();
     assert_eq!(app.sessions[1].connection.id, 0);
+    assert!(app.saved_connection(1).is_none());
     assert_eq!(
         app.sessions[0].connection.id, 2,
         "other libraries are left alone"
     );
     assert_eq!(app.state.tab_libraries, [team, state::Library::Personal]);
+}
+
+fn session_pane_frame(
+    app: &mut App,
+    ctx: &egui::Context,
+    pane: Pane,
+    size: Vec2,
+    events: Vec<egui::Event>,
+) -> egui::FullOutput {
+    ctx.run(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, size)),
+            events,
+            ..Default::default()
+        },
+        |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                app.session_pane(ui, 0, pane);
+            });
+        },
+    )
+}
+
+#[test]
+fn session_panes_keep_remote_identity_visible_and_loading_guidance_relevant() {
+    for protocol in Protocol::ALL {
+        for pane in [Pane::Main, Pane::Left, Pane::Beside, Pane::Window] {
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            let mut app = test_app(&ctx);
+            let mut c = app.connections[0].clone();
+            c.protocol = protocol;
+            c.port = protocol.port();
+            c.username = "deploy".into();
+            if protocol == Protocol::Vnc {
+                c.host = format!("{}.example", "long-host-".repeat(20));
+            }
+            let identity = format!(
+                "{} · deploy@{}:{}",
+                protocol.label(),
+                c.host,
+                protocol.port()
+            );
+            let mut session = session::Session::restored(c, false, ctx.clone());
+            session.started = Instant::now() - Duration::from_secs(21);
+            app.sessions.push(session);
+            for width in [320., 1100.] {
+                let output =
+                    session_pane_frame(&mut app, &ctx, pane, Vec2::new(width, 600.), vec![]);
+                let update = output.platform_output.accesskit_update.unwrap();
+                let shown = |text: &str| update.nodes.iter().any(|(_, n)| n.value() == Some(text));
+                assert!(shown(&identity));
+                let (_, identity_node) = update
+                    .nodes
+                    .iter()
+                    .find(|(_, n)| {
+                        n.role() == egui::accesskit::Role::Label && n.value() == Some(&identity)
+                    })
+                    .unwrap();
+                let bounds = identity_node.bounds().unwrap();
+                assert!(
+                    bounds.x0 >= 0. && bounds.x1 <= f64::from(width),
+                    "remote identity overflowed"
+                );
+                assert!(shown(
+                    "Still connecting. Check that the host is reachable, or close this tab to cancel."
+                ));
+                assert!(!shown("Waiting for the Windows RDP control to initialize."));
+                match protocol {
+                    Protocol::Rdp => assert!(shown(rdp::CONNECTING_HELP)),
+                    Protocol::Vnc => {
+                        assert!(shown(
+                            "Enter a password in this tab if the server asks for one."
+                        ));
+                        assert!(!shown(rdp::CONNECTING_HELP));
+                    }
+                    Protocol::Ssh => assert!(shown(
+                        "Starting SSH with your configured client, keys and agent."
+                    )),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn connection_recovery_edits_current_settings_only_in_the_sessions_own_library() {
+    for mode in ["desktop", "files-restored", "files-ended"] {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = test_app(&ctx);
+        let mut c = app.connections[0].clone();
+        c.protocol = if mode == "desktop" {
+            Protocol::Rdp
+        } else {
+            Protocol::Ssh
+        };
+        let mut session = session::Session::restored(c, mode != "desktop", ctx.clone());
+        session.error = Some("The server refused the connection. ".repeat(100));
+        if mode == "files-ended" {
+            let mut browser = crate::sftp::Browser::demo("/srv", vec![]);
+            browser.status = crate::sftp::Status::Ended("The connection was closed.".into());
+            session.files = Some(browser);
+        }
+        app.sessions.push(session);
+        app.connections[0].host = "updated.example".into();
+        let size = Vec2::new(400., 300.);
+        let _ = session_pane_frame(&mut app, &ctx, Pane::Main, size, vec![]);
+        let output = session_pane_frame(&mut app, &ctx, Pane::Main, size, vec![]);
+        let update = output.platform_output.accesskit_update.unwrap();
+        let mut edit_at = egui::Pos2::ZERO;
+        for label in ["Reconnect", "Edit connection"] {
+            let (_, node) = update
+                .nodes
+                .iter()
+                .find(|(_, n)| n.label() == Some(label))
+                .unwrap();
+            let bounds = node.bounds().unwrap();
+            assert!(
+                bounds.x0 >= 0. && bounds.y0 >= 0. && bounds.x1 <= 400. && bounds.y1 <= 300.,
+                "{mode}: {label} outside pane: {bounds:?}"
+            );
+            if label == "Edit connection" {
+                edit_at = egui::pos2(
+                    ((bounds.x0 + bounds.x1) / 2.) as f32,
+                    ((bounds.y0 + bounds.y1) / 2.) as f32,
+                );
+            }
+        }
+        let _ = session_pane_frame(
+            &mut app,
+            &ctx,
+            Pane::Main,
+            size,
+            vec![egui::Event::PointerMoved(edit_at)],
+        );
+        for pressed in [true, false] {
+            let _ = session_pane_frame(
+                &mut app,
+                &ctx,
+                Pane::Main,
+                size,
+                vec![egui::Event::PointerButton {
+                    pos: edit_at,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+        }
+        assert!(
+            matches!(&app.modal, Modal::Editor(c) if c.host == "updated.example"),
+            "{mode}: wrong connection edited"
+        );
+        app.modal = Modal::None;
+        app.sessions[0].library = state::Library::Sqlite(PathBuf::from("other.sqlite"));
+        let output = session_pane_frame(&mut app, &ctx, Pane::Main, size, vec![]);
+        let update = output.platform_output.accesskit_update.unwrap();
+        assert!(
+            !update
+                .nodes
+                .iter()
+                .any(|(_, n)| n.label() == Some("Edit connection"))
+        );
+        assert_eq!(app.current_settings(0).host, "alpha.example");
+    }
 }
 
 #[test]

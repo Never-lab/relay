@@ -1105,14 +1105,19 @@ impl App {
         }
     }
 
-    /// Session `index`'s connection with its current saved settings, when it came from the
-    /// open library.
-    fn current_settings(&self, index: usize) -> Connection {
+    /// The saved connection belonging to this session, only in its own open library.
+    fn saved_connection(&self, index: usize) -> Option<&Connection> {
         let session = &self.sessions[index];
         (self.connections.iter())
             .filter(|_| session.library == state::Library::of(&self.location))
             .find(|c| c.id == session.connection.id)
-            .unwrap_or(&session.connection)
+    }
+
+    /// Session `index`'s connection with its current saved settings, when it came from the
+    /// open library.
+    fn current_settings(&self, index: usize) -> Connection {
+        self.saved_connection(index)
+            .unwrap_or(&self.sessions[index].connection)
             .clone()
     }
 
@@ -1155,6 +1160,8 @@ impl App {
         self.editor_forwards_touched = false;
         self.ctx
             .data_mut(|data| data.remove::<bool>(egui::Id::new("editor-reveal-error")));
+        self.ctx
+            .send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
     }
 
     /// Shows the current notice in a corner without moving the page, until it expires.

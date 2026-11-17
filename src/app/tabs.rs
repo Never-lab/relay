@@ -528,7 +528,7 @@ pub(super) fn session_tab(
 }
 
 /// What a session tab's tooltip says: what it is, where it connects, and its state. Session
-/// panes have no header of their own, so this is where the address shows.
+/// panes also keep the address visible while working.
 pub(super) fn details(connection: &Connection, kind: Kind, state: session::TabState) -> String {
     let state = match state {
         session::TabState::Open => "open",

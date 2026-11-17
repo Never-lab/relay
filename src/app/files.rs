@@ -40,6 +40,7 @@ enum Action {
         folders: bool,
     },
     Reconnect,
+    EditConnection,
     Copy(String),
 }
 
@@ -79,28 +80,35 @@ impl App {
         // Files dropped without a pointer position go to the side in front, or to the other
         // side when the one in front is not a browser.
         let fallback = active == Some(index) || !active_browses;
+        let can_edit = self.saved_connection(index).is_some();
         let session = &mut self.sessions[index];
         let key = session.key;
         let mut actions = vec![];
         match session.files.as_mut() {
-            Some(files) => browser(ui, files, key, covered, fallback, &mut actions),
+            Some(files) => browser(ui, files, key, covered, fallback, can_edit, &mut actions),
             None => {
                 // A restored tab not connected yet, or a restart that failed.
-                let error = session
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| "Not connected.".into());
+                let error = session.error.clone().unwrap_or_else(|| {
+                    "This tab was reopened. Reconnect to start browsing files.".into()
+                });
                 ui.add_space(40.);
-                ui.label(RichText::new(error).size(15.));
-                ui.add_space(12.);
-                if ui.button("Reconnect").clicked() {
+                let (reconnect, edit) = connection_recovery(ui, &error, can_edit);
+                if reconnect {
                     actions.push(Action::Reconnect);
+                }
+                if edit {
+                    actions.push(Action::EditConnection);
                 }
             }
         }
         for action in actions {
             match action {
                 Action::Reconnect => self.reconnect(index),
+                Action::EditConnection => {
+                    if let Some(connection) = self.saved_connection(index).cloned() {
+                        self.edit(connection);
+                    }
+                }
                 Action::Copy(text) => {
                     ui.ctx().copy_text(text.clone());
                     self.notify(format!("Copied {text}"));
@@ -174,6 +182,7 @@ fn browser(
     key: u64,
     covered: bool,
     fallback: bool,
+    can_edit: bool,
     actions: &mut Vec<Action>,
 ) {
     let area = ui.available_rect_before_wrap();
@@ -193,10 +202,12 @@ fn browser(
         Status::Connecting => return connecting(ui, files),
         Status::Ended(reason) => {
             ui.add_space(40.);
-            ui.label(RichText::new(reason).size(15.));
-            ui.add_space(12.);
-            if ui.button("Reconnect").clicked() {
+            let (reconnect, edit) = connection_recovery(ui, &reason, can_edit);
+            if reconnect {
                 actions.push(Action::Reconnect);
+            }
+            if edit {
+                actions.push(Action::EditConnection);
             }
             // Edits wait here for the connection, and carry on once it is back.
             if !files.edits.is_empty() {
