@@ -2,6 +2,36 @@
 use super::*;
 use egui::{Align, Align2, FontId, Layout, Margin, Rect, Sense, UiBuilder};
 
+// Settings use the shared palette, radii and control height; only layout lives here.
+const SECTION_GAP: f32 = 12.;
+const ROW_GAP: f32 = 6.;
+const HELP_SIZE: f32 = 12.;
+const LABEL_WIDTH: f32 = 48.;
+
+fn help(ui: &mut egui::Ui, text: impl Into<String>) {
+    ui.add(
+        egui::Label::new(
+            RichText::new(text)
+                .size(HELP_SIZE)
+                .color(theme::palette(ui.ctx()).muted),
+        )
+        .wrap(),
+    );
+}
+
+fn section_break(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(SECTION_GAP);
+    section_label(ui, title);
+}
+
+fn row_label(ui: &mut egui::Ui, text: &str) {
+    let size = Vec2::new(LABEL_WIDTH, CONTROL_HEIGHT);
+    ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
+        ui.set_min_size(size);
+        ui.label(RichText::new(text).color(theme::palette(ui.ctx()).muted));
+    });
+}
+
 impl App {
     pub(super) fn settings(&mut self, ctx: &egui::Context) {
         if !matches!(self.modal, Modal::Settings) {
@@ -16,6 +46,33 @@ impl App {
         let mut shortcuts = false;
         dialog("settings", ctx).show(ctx, |ui| {
             ui.set_width(dialog_width(ctx, 540.));
+            let compact_header = ui.available_width() < 450.;
+            let mut metadata = |ui: &mut egui::Ui| {
+                if let Some(commit) = option_env!("RELAY_COMMIT") {
+                    ui.hyperlink_to(
+                        RichText::new(commit).size(12.),
+                        format!("{}/commit/{commit}", env!("CARGO_PKG_REPOSITORY")),
+                    )
+                    .on_hover_text("View commit on GitHub");
+                    ui.label(RichText::new("·").size(12.).color(colors.muted));
+                }
+                let version = version();
+                if ui
+                    .add(
+                        egui::Label::new(
+                            RichText::new(format!("Relay {}", env!("CARGO_PKG_VERSION")))
+                                .size(12.)
+                                .color(colors.muted),
+                        )
+                        .sense(Sense::click()),
+                    )
+                    .on_hover_text("Click to copy")
+                    .clicked()
+                {
+                    ui.ctx().copy_text(version.clone());
+                    copied_version = Some(version);
+                }
+            };
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Settings").size(TITLE_SIZE).strong());
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -24,42 +81,29 @@ impl App {
                         .button("Keyboard shortcuts")
                         .on_hover_text("F1")
                         .clicked();
-                    if let Some(commit) = option_env!("RELAY_COMMIT") {
-                        ui.hyperlink_to(
-                            RichText::new(commit).size(12.),
-                            format!("{}/commit/{commit}", env!("CARGO_PKG_REPOSITORY")),
-                        )
-                        .on_hover_text("View commit on GitHub");
-                        ui.label(RichText::new("·").size(12.).color(colors.muted));
-                    }
-                    let version = version();
-                    if ui
-                        .add(
-                            egui::Label::new(
-                                RichText::new(format!("Relay {}", env!("CARGO_PKG_VERSION")))
-                                    .size(12.)
-                                    .color(colors.muted),
-                            )
-                            .sense(Sense::click()),
-                        )
-                        .on_hover_text("Click to copy")
-                        .clicked()
-                    {
-                        ui.ctx().copy_text(version.clone());
-                        copied_version = Some(version);
+                    if !compact_header {
+                        metadata(ui);
                     }
                 });
             });
+            if compact_header {
+                ui.horizontal(|ui| {
+                    ui.with_layout(Layout::right_to_left(Align::Center), &mut metadata);
+                });
+            }
             ui.add_space(4.);
             tab_bar(ui, &mut self.settings_tab);
-            let height = (ctx.content_rect().height() - 220.).clamp(200., 540.);
+            let height = (ctx.content_rect().height() - 220.).clamp(80., 540.);
             egui::ScrollArea::vertical()
                 .id_salt(("settings-body", self.settings_tab))
                 .auto_shrink([false, false])
                 .min_scrolled_height(height)
                 .max_height(height)
                 .show(ui, |ui| {
-                    ui.add_space(12.);
+                    ui.spacing_mut().item_spacing.y = ROW_GAP;
+                    ui.spacing_mut().interact_size.y = CONTROL_HEIGHT;
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                    ui.add_space(SECTION_GAP);
                     match self.settings_tab {
                         SettingsTab::Appearance => {
                             theme_picker(ui, &mut choice);
@@ -68,14 +112,20 @@ impl App {
                         SettingsTab::Terminal => self.terminal_settings(ui),
                         SettingsTab::Library => action = self.library_settings(ui),
                         SettingsTab::Snippets => {
-                            ui.label(
-                                RichText::new(
-                                    "Saved commands for SSH sessions. Press Ctrl+Shift+P in a \
-                                     terminal.",
-                                )
-                                .color(colors.muted),
+                            section_label(ui, "SSH SNIPPETS");
+                            help(
+                                ui,
+                                "Save commands you use often, then send them to an SSH session.",
                             );
-                            ui.add_space(4.);
+                            help(
+                                ui,
+                                if cfg!(target_os = "macos") {
+                                    "Open snippets in a terminal with Cmd+Shift+P."
+                                } else {
+                                    "Open snippets in a terminal with Ctrl+Shift+P."
+                                },
+                            );
+                            ui.add_space(ROW_GAP);
                             self.snippet_settings(ui);
                         }
                     }
@@ -148,8 +198,7 @@ impl App {
                     action = Some(LibraryAction::Switch);
                 }
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    let (dot, _) = ui.allocate_exact_size(Vec2::splat(8.), Sense::hover());
-                    ui.painter().circle_filled(dot.center(), 3.5, colors.accent);
+                    ui.label(RichText::new("Active").size(HELP_SIZE).color(colors.muted));
                     ui.add(
                         egui::Label::new(RichText::new(self.location.label()).strong()).truncate(),
                     );
@@ -168,10 +217,8 @@ impl App {
             )
             .on_hover_text(&detail);
         }
-        ui.label(RichText::new(facts).size(12.).color(colors.muted));
-        ui.add_space(14.);
-        ui.separator();
-        section_label(ui, "IMPORT & EXPORT");
+        help(ui, facts);
+        section_break(ui, "IMPORT & EXPORT");
         ui.label(
             RichText::new(
                 "Bring in connections from CSV, your SSH config, .rdp files, or a Relay JSON \
@@ -221,9 +268,10 @@ impl App {
                     // Imports wait for a library switch in progress; exports do not.
                     let enabled =
                         self.pending.is_none() || matches!(choice, LibraryAction::Export(_));
-                    let mut button = ui
-                        .add_enabled_ui(enabled, |ui| outline_button(ui, label, width))
-                        .inner;
+                    let mut button = ui.add_enabled(
+                        enabled,
+                        egui::Button::new(label).min_size(Vec2::new(width, CONTROL_HEIGHT)),
+                    );
                     if !hint.is_empty() {
                         button = button.on_hover_text(hint);
                     }
@@ -267,16 +315,10 @@ impl App {
             .clone();
         let settings = self.state.terminal.clone();
         let mut next = settings.clone();
-        // Row names at the left edge, in the same muted color as "Colors" below them.
-        let row_label = |ui: &mut egui::Ui, text: &str| {
-            let size = Vec2::new(64., ui.spacing().interact_size.y);
-            ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
-                ui.set_min_size(size);
-                ui.label(RichText::new(text).color(colors.muted));
-            });
-        };
+        section_label(ui, "FONT");
         ui.horizontal(|ui| {
-            row_label(ui, "Font");
+            row_label(ui, "Family");
+            let font_width = (ui.available_width() - 116.).max(64.);
             let current = match &settings.font {
                 None => "System monospace".to_string(),
                 Some(path) => (scan.fonts().unwrap_or_default().iter())
@@ -289,32 +331,45 @@ impl App {
                         )
                     }),
             };
-            egui::ComboBox::from_id_salt("terminal-font")
-                .selected_text(current)
-                .width(220.)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut next.font, None, "System monospace");
-                    match scan.fonts() {
-                        None => {
-                            ui.horizontal(|ui| {
-                                ui.spinner();
-                                ui.label(RichText::new("Looking for fonts…").color(colors.muted));
-                            });
-                        }
-                        Some(fonts) => {
-                            for font in fonts {
-                                ui.selectable_value(
-                                    &mut next.font,
-                                    Some(font.path.clone()),
-                                    &font.family,
-                                )
-                                .on_hover_text(font.path.display().to_string());
+            ui.allocate_ui_with_layout(
+                Vec2::new(font_width, CONTROL_HEIGHT),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    ui.set_width(font_width);
+                    egui::ComboBox::from_id_salt("terminal-font")
+                        .selected_text(current)
+                        .width(font_width)
+                        .wrap_mode(egui::TextWrapMode::Truncate)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut next.font, None, "System monospace");
+                            match scan.fonts() {
+                                None => {
+                                    ui.horizontal(|ui| {
+                                        ui.spinner();
+                                        ui.label(
+                                            RichText::new("Looking for fonts…").color(colors.muted),
+                                        );
+                                    });
+                                }
+                                Some(fonts) => {
+                                    for font in fonts {
+                                        ui.selectable_value(
+                                            &mut next.font,
+                                            Some(font.path.clone()),
+                                            &font.family,
+                                        )
+                                        .on_hover_text(font.path.display().to_string());
+                                    }
+                                }
                             }
-                        }
-                    }
-                });
+                        });
+                },
+            );
             if ui
-                .button("Choose file…")
+                .add_sized(
+                    [100., CONTROL_HEIGHT],
+                    egui::Button::new("Choose file…").truncate(),
+                )
                 .on_hover_text("A TrueType or OpenType font file")
                 .clicked()
                 && let Some(path) = file_dialog::choose(self.parent, file_dialog::Kind::Font)
@@ -326,6 +381,7 @@ impl App {
         });
         ui.horizontal(|ui| {
             row_label(ui, "Size");
+            ui.spacing_mut().slider_width = (ui.available_width() - 140.).clamp(40., 200.);
             ui.add(
                 egui::Slider::new(&mut next.font_size, crate::terminal::FONT_SIZES)
                     .step_by(1.)
@@ -343,6 +399,7 @@ impl App {
             .size(12.)
             .color(colors.muted),
         );
+        section_break(ui, "CLIPBOARD");
         ui.checkbox(
             &mut next.programs_copy,
             "Programs on the server can copy to this computer's clipboard",
@@ -351,9 +408,7 @@ impl App {
             "As tmux, vim and others do with OSC 52. Relay says when it happens. \
              Programs can never read the clipboard.",
         );
-        ui.add_space(6.);
-        ui.label(RichText::new("Colors").color(colors.muted));
-        ui.add_space(2.);
+        section_break(ui, "TERMINAL COLORS");
         let workspace = theme::current(ui.ctx());
         let schemes = crate::terminal::Scheme::ALL;
         for pair in schemes.chunks(2) {
@@ -372,7 +427,8 @@ impl App {
                 }
             });
         }
-        ui.add_space(6.);
+        ui.add_space(2.);
+        help(ui, "Preview");
         terminal_sample(ui, next.font_size, &next.scheme.colors(workspace));
         if next.font != settings.font {
             match set_fonts(ui.ctx(), next.font.as_deref()) {
@@ -388,9 +444,7 @@ impl App {
             self.state.terminal = next;
             self.save_state();
         }
-        ui.add_space(14.);
-        ui.separator();
-        section_label(ui, "FILE BROWSER");
+        section_break(ui, "FILE BROWSER");
         let mut editor = self.state.editor.clone();
         field(
             ui,
@@ -411,9 +465,7 @@ impl App {
             self.state.editor = editor;
             self.save_state();
         }
-        ui.add_space(14.);
-        ui.separator();
-        section_label(ui, "SESSIONS");
+        section_break(ui, "SESSIONS");
         let mut reopen = !self.state.forget_tabs;
         if ui.checkbox(&mut reopen, "Reopen tabs at startup").changed() {
             self.state.forget_tabs = !reopen;
@@ -451,9 +503,13 @@ impl App {
             );
             let ready = !draft.name.trim().is_empty() && !draft.command.trim().is_empty();
             let (index, draft) = (*index, draft.clone());
+            if !ready {
+                help(ui, "Enter a name and command to save this snippet.");
+            }
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(ready, egui::Button::new("Save snippet"))
+                    .add_enabled_ui(ready, |ui| accent_button(ui, "Save snippet", 120.))
+                    .inner
                     .clicked()
                 {
                     let snippet = state::Snippet {
@@ -473,6 +529,19 @@ impl App {
             });
             return;
         }
+        if self.state.snippets.is_empty() {
+            ui.label(RichText::new("No snippets yet").strong());
+            help(
+                ui,
+                "Keep service checks, log commands, and deployment steps close at hand.",
+            );
+            ui.label(
+                RichText::new("systemctl status nginx")
+                    .monospace()
+                    .color(colors.muted),
+            );
+            ui.add_space(ROW_GAP);
+        }
         let mut edit = None;
         let mut delete = None;
         for (i, snippet) in self.state.snippets.iter().enumerate() {
@@ -484,8 +553,10 @@ impl App {
                     if ui.small_button("Edit").clicked() {
                         edit = Some(i);
                     }
-                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                        ui.label(RichText::new(&snippet.name).strong());
+                    ui.with_layout(Layout::top_down(Align::LEFT), |ui| {
+                        ui.spacing_mut().item_spacing.y = 2.;
+                        ui.add(egui::Label::new(RichText::new(&snippet.name).strong()).truncate())
+                            .on_hover_text(&snippet.name);
                         ui.add(
                             egui::Label::new(
                                 RichText::new(snippet.command.lines().next().unwrap_or(""))
@@ -494,10 +565,12 @@ impl App {
                                     .color(colors.muted),
                             )
                             .truncate(),
-                        );
+                        )
+                        .on_hover_text(&snippet.command);
                     });
                 });
             });
+            ui.add(egui::Separator::default().spacing(ROW_GAP));
         }
         if let Some(i) = edit {
             self.snippet_draft = Some((Some(i), self.state.snippets[i].clone()));
@@ -506,7 +579,7 @@ impl App {
             self.state.snippets.remove(i);
             self.save_state();
         }
-        if outline_button(ui, "Add snippet", 140.).clicked() {
+        if accent_button(ui, "Add snippet", 140.).clicked() {
             self.snippet_draft = Some((
                 None,
                 state::Snippet {
@@ -737,6 +810,14 @@ pub(super) fn tab_bar(ui: &mut egui::Ui, current: &mut SettingsTab) {
         } else {
             colors.muted
         };
+        if response.has_focus() {
+            ui.painter().rect_stroke(
+                rect.shrink(1.),
+                RADIUS_SMALL,
+                Stroke::new(1_f32, colors.text),
+                egui::StrokeKind::Inside,
+            );
+        }
         ui.painter().galley(text.min, galley, color);
         if open {
             ui.painter().rect_filled(
@@ -757,6 +838,7 @@ pub(super) fn tab_bar(ui: &mut egui::Ui, current: &mut SettingsTab) {
 /// The workspace themes, two to a row.
 fn theme_picker(ui: &mut egui::Ui, choice: &mut theme::Theme) {
     let colors = theme::palette(ui.ctx());
+    section_label(ui, "WORKSPACE THEME");
     ui.label(
         RichText::new("Choose a workspace theme. Saved on this computer.").color(colors.muted),
     );
@@ -778,9 +860,9 @@ fn zoom_picker(ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     let zoom = ctx.zoom_factor();
     let percent = |zoom: f32| format!("{:.0}%", zoom * 100.);
-    ui.add_space(16.);
+    section_break(ui, "WORKSPACE ZOOM");
     ui.horizontal(|ui| {
-        ui.label("Zoom");
+        row_label(ui, "Zoom");
         egui::ComboBox::from_id_salt("zoom")
             .selected_text(percent(zoom))
             .show_ui(ui, |ui| {
@@ -839,13 +921,7 @@ fn scheme_option(
 ) -> egui::Response {
     let colors = theme::palette(ui.ctx());
     let pal = scheme.colors(workspace);
-    let response = ui.add_sized(
-        [ui.available_width(), 34.],
-        egui::Button::new("").selected(selected),
-    );
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), scheme.name())
-    });
+    let response = choice_button(ui, scheme.name(), selected);
     let center = response.rect.center();
     let swatch = egui::Rect::from_center_size(
         egui::pos2(response.rect.left() + 26., center.y),
@@ -868,22 +944,7 @@ fn scheme_option(
             color,
         );
     }
-    ui.painter().text(
-        egui::pos2(swatch.right() + 10., center.y),
-        Align2::LEFT_CENTER,
-        scheme.name(),
-        FontId::proportional(13.),
-        colors.text,
-    );
-    if selected {
-        ui.painter().text(
-            egui::pos2(response.rect.right() - 12., center.y),
-            Align2::RIGHT_CENTER,
-            "Selected",
-            FontId::proportional(11.),
-            colors.accent,
-        );
-    }
+    choice_label(ui, &response, scheme.name(), swatch.right() + 10.);
     response
 }
 
@@ -945,35 +1006,130 @@ pub(super) fn theme_option(
     candidate: theme::Theme,
     selected: bool,
 ) -> egui::Response {
-    let colors = theme::palette(ui.ctx());
-    let response = ui.add_sized(
-        [ui.available_width(), 34.],
-        egui::Button::new("").selected(selected),
-    );
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), candidate.name())
-    });
+    let response = choice_button(ui, candidate.name(), selected);
     let center = response.rect.center();
     ui.painter().circle_filled(
         egui::pos2(response.rect.left() + 16., center.y),
         5.,
         candidate.colors().accent,
     );
-    ui.painter().text(
-        egui::pos2(response.rect.left() + 30., center.y),
-        Align2::LEFT_CENTER,
-        candidate.name(),
-        FontId::proportional(13.),
-        colors.text,
+    choice_label(ui, &response, candidate.name(), response.rect.left() + 30.);
+    response
+}
+
+/// Native button interaction, with a non-color selection mark and an explicit focus ring.
+fn choice_button(ui: &mut egui::Ui, name: &str, selected: bool) -> egui::Response {
+    let colors = theme::palette(ui.ctx());
+    let response = ui.add_sized(
+        [ui.available_width(), CONTROL_HEIGHT + 2.],
+        egui::Button::new("").selected(selected),
     );
-    if selected {
-        ui.painter().text(
-            egui::pos2(response.rect.right() - 12., center.y),
-            Align2::RIGHT_CENTER,
-            "Selected",
-            FontId::proportional(11.),
-            colors.accent,
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, name)
+    });
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            response.rect.shrink(2.),
+            RADIUS_SMALL,
+            Stroke::new(1_f32, colors.text),
+            egui::StrokeKind::Inside,
         );
     }
-    response
+    if selected {
+        // Draw the mark: symbol glyph coverage differs between system fonts.
+        let center = response.rect.right_center() - Vec2::new(17., 0.);
+        let stroke = Stroke::new(1.5_f32, colors.text);
+        ui.painter().line_segment(
+            [center + Vec2::new(-4., 0.), center + Vec2::new(-1., 3.)],
+            stroke,
+        );
+        ui.painter().line_segment(
+            [center + Vec2::new(-1., 3.), center + Vec2::new(5., -4.)],
+            stroke,
+        );
+    }
+    response.on_hover_text(name)
+}
+
+/// Reserve room for the selection mark even when names or system fonts are wide.
+fn choice_label(ui: &egui::Ui, response: &egui::Response, name: &str, left: f32) {
+    let color = theme::palette(ui.ctx()).text;
+    let mut job = egui::text::LayoutJob::simple(
+        name.into(),
+        FontId::proportional(13.),
+        color,
+        (response.rect.right() - 30. - left).max(0.),
+    );
+    job.wrap.max_rows = 1;
+    let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+    let painter = ui
+        .painter()
+        .with_clip_rect(response.rect.intersect(ui.clip_rect()));
+    painter.galley(
+        egui::pos2(left, response.rect.center().y - galley.size().y / 2.),
+        galley,
+        color,
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn choices_support_keyboard_activation_and_non_color_selection() {
+        for theme in theme::Theme::ALL {
+            let ctx = egui::Context::default();
+            apply_style(&ctx);
+            theme.apply(&ctx);
+            let mut id = None;
+            let mut clicked = false;
+            for frame in 0..3 {
+                let output = ctx.run(
+                    egui::RawInput {
+                        events: if frame == 2 {
+                            vec![egui::Event::Key {
+                                key: egui::Key::Enter,
+                                physical_key: None,
+                                pressed: true,
+                                repeat: false,
+                                modifiers: egui::Modifiers::NONE,
+                            }]
+                        } else {
+                            vec![]
+                        },
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            ui.set_width(220.);
+                            let response = theme_option(ui, theme, true);
+                            id = Some(response.id);
+                            if frame == 0 {
+                                response.request_focus();
+                            }
+                            if frame == 1 {
+                                assert!(response.has_focus());
+                            }
+                            clicked = response.clicked();
+                        });
+                    },
+                );
+                assert_eq!(
+                    output
+                        .shapes
+                        .iter()
+                        .filter(|shape| {
+                            matches!(&shape.shape, egui::Shape::LineSegment { stroke, .. }
+                        if stroke.width == 1.5 && stroke.color == theme.colors().text)
+                        })
+                        .count(),
+                    2,
+                    "{} has a drawn selection mark",
+                    theme.name()
+                );
+            }
+            assert!(clicked, "{} activates with Enter ({id:?})", theme.name());
+        }
+    }
 }

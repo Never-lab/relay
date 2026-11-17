@@ -2320,3 +2320,129 @@ fn native_desktops_take_physical_pixels_with_overlays_cut_out() {
     // Only the part of the menu over the desktop, from the desktop's corner.
     assert_eq!(holes, [[180, 20, 20, 20]]);
 }
+
+/// Settings must keep controls inside the modal even when text and zoom reduce its width.
+#[test]
+fn settings_fit_small_viewports_across_workspace_themes() {
+    use settings::SettingsTab;
+    for theme in theme::Theme::ALL {
+        for (viewport, zoom) in [
+            (Vec2::new(1200., 800.), 1.),
+            (Vec2::new(640., 480.), 1.),
+            (Vec2::new(480., 360.), 1.),
+            (Vec2::new(900., 700.), 1.5),
+            (Vec2::new(1200., 900.), 2.),
+            (Vec2::new(800., 600.), 2.),
+        ] {
+            let size = viewport / zoom;
+            let ctx = egui::Context::default();
+            apply_style(&ctx);
+            theme.apply(&ctx);
+            ctx.options_mut(|options| options.zoom_factor = zoom);
+            let mut app = test_app(&ctx);
+            app.state_path = None;
+            app.modal = Modal::Settings;
+            app.location = database::Location::Sqlite(PathBuf::from(format!(
+                "//fileserver/{}/connections.sqlite",
+                "long-team-directory/".repeat(12)
+            )));
+            app.state.editor = "/a/very/long/editor/path/".repeat(16);
+            app.state.snippets.push(state::Snippet {
+                name: "A long snippet name ".repeat(20),
+                command: "systemctl status nginx ".repeat(30),
+                run: true,
+            });
+            for tab in [
+                SettingsTab::Appearance,
+                SettingsTab::Terminal,
+                SettingsTab::Library,
+                SettingsTab::Snippets,
+            ] {
+                app.settings_tab = tab;
+                let mut header_text = vec![];
+                for _ in 0..3 {
+                    let output = ctx.run(
+                        egui::RawInput {
+                            screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, size)),
+                            ..Default::default()
+                        },
+                        |ctx| app.settings(ctx),
+                    );
+                    header_text = output
+                        .shapes
+                        .iter()
+                        .filter_map(|clipped| {
+                            if let egui::Shape::Text(text) = &clipped.shape {
+                                Some((text.galley.text().to_owned(), text.visual_bounding_rect()))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                }
+                let title = header_text
+                    .iter()
+                    .find(|(text, _)| text == "Settings")
+                    .unwrap()
+                    .1;
+                for (text, rect) in &header_text {
+                    if text != "Settings" {
+                        assert!(
+                            !title.intersects(*rect),
+                            "{theme:?} {tab:?} at {size:?}: title overlaps {text:?}"
+                        );
+                    }
+                }
+                let rect = ctx
+                    .memory(|memory| memory.area_rect(egui::Id::new("settings")))
+                    .unwrap();
+                assert!(
+                    rect.width() <= size.x && rect.height() <= size.y,
+                    "{theme:?} {tab:?} at {size:?}: modal {rect:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn terminal_settings_scroll_to_the_last_section() {
+    let ctx = egui::Context::default();
+    apply_style(&ctx);
+    let mut app = test_app(&ctx);
+    app.state_path = None;
+    app.modal = Modal::Settings;
+    app.settings_tab = settings::SettingsTab::Terminal;
+    let mut last_visible = false;
+    for frame in 0..12 {
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(640., 480.))),
+                time: Some(frame as f64 * 0.1),
+                events: if frame >= 3 {
+                    vec![
+                        egui::Event::PointerMoved(egui::pos2(320., 240.)),
+                        egui::Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: Vec2::new(0., -1000.),
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ]
+                } else {
+                    vec![]
+                },
+                ..Default::default()
+            },
+            |ctx| app.settings(ctx),
+        );
+        last_visible |= output.shapes.iter().any(|clipped| {
+            matches!(&clipped.shape, egui::Shape::Text(text)
+                if text.galley.text() == "Reopen tabs at startup"
+                && clipped.clip_rect.contains_rect(text.visual_bounding_rect()))
+        });
+    }
+    assert!(
+        last_visible,
+        "the last terminal setting is reachable by scrolling"
+    );
+}
