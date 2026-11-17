@@ -106,11 +106,6 @@ impl Finder {
         }
     }
 
-    /// Whether finding stopped early at [`MAX_MATCHES`].
-    pub fn truncated(&self) -> bool {
-        self.found.truncated
-    }
-
     pub fn line(&mut self, line: &Line) {
         if self.found.len() >= MAX_MATCHES {
             self.found.truncated = true;
@@ -314,7 +309,7 @@ mod tests {
         let mut finder = Finder::reusing("a", found);
         history.iter().for_each(|line| finder.line(line));
         assert_eq!(finder.found.cells.as_ptr(), memory);
-        assert!(finder.truncated());
+        assert!(finder.found.truncated);
         let mut search = Search {
             query: "a".into(),
             ..Search::default()
