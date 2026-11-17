@@ -374,6 +374,8 @@ pub(super) fn search_field(
             .id(id),
     );
     let rect = response.rect;
+    ui.ctx()
+        .accesskit_node_builder(response.id, |node| node.set_label(hint));
     icons::paint_sized(
         ui.painter(),
         icons::Icon::Search,
@@ -402,8 +404,12 @@ pub(super) fn search_field(
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text("Clear");
         clear.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Clear"));
-        if clear.hovered() {
+        if clear.hovered() || clear.has_focus() {
             ui.painter().circle_filled(center, 10., colors.hover);
+        }
+        if clear.has_focus() {
+            ui.painter()
+                .circle_stroke(center, 10., Stroke::new(1_f32, colors.accent));
         }
         let color = if clear.hovered() {
             colors.text

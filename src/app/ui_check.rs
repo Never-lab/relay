@@ -2,10 +2,31 @@
 use super::*;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-pub fn seed(app: &mut App) {
-    if std::env::var_os("RELAY_UI_CHECK").is_none() {
-        return;
+pub(super) fn new(ctx: egui::Context, parent: Option<platform::Window>) -> App {
+    ctx.set_theme(egui::Theme::Dark);
+    let _ = set_fonts(&ctx, None);
+    theme::Theme::default().apply(&ctx);
+    apply_style(&ctx);
+    let mut app = App::with(
+        ctx,
+        PathBuf::new(),
+        Ok(database::Snapshot {
+            connections: vec![],
+            revision: 0,
+        }),
+        None,
+        None,
+        parent,
+        state::State::default(),
+    );
+    seed(&mut app);
+    if let Some(parent) = parent {
+        parent.set_theme(theme::current(&app.ctx));
     }
+    app
+}
+
+fn seed(app: &mut App) {
     app.state = state::State::default();
     app.state_path = None;
     app.ctx.set_zoom_factor(1.);
@@ -424,14 +445,22 @@ git pull && ./deploy.sh",
         };
         app.db_mysql.tls = std::env::var_os("RELAY_UI_NO_TLS").is_none();
     }
-    if std::env::var_os("RELAY_UI_IMPORT").is_some() {
-        app.modal = Modal::Import(
-            csv_io::read(
-                &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(csv_io::FIXTURE),
-                &[],
-            )
-            .unwrap(),
-        );
+    if std::env::var("RELAY_UI_IMPORT").as_deref() == Ok("loading") {
+        app.start_import(|_| {
+            std::thread::sleep(Duration::from_secs(60));
+            Err("Preview finished".into())
+        });
+    } else if std::env::var_os("RELAY_UI_IMPORT").is_some() {
+        let mut import = csv_io::read(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(csv_io::FIXTURE),
+            &[],
+        )
+        .unwrap();
+        if std::env::var("RELAY_UI_IMPORT").as_deref() == Ok("error") {
+            import.connections.truncate(1);
+            app.error = Some("The library changed. Refresh before importing again.".into());
+        }
+        app.modal = Modal::Import(import);
     }
     if std::env::var_os("RELAY_UI_FIXTURE").is_some() {
         app.connections = csv_io::read(

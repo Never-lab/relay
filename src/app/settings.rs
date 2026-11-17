@@ -666,14 +666,45 @@ impl App {
                             let snippet = &self.state.snippets[i];
                             let (rect, response) =
                                 ui.allocate_exact_size(Vec2::new(width, 42.), Sense::click());
-                            if response.hovered() && moved {
+                            if (response.hovered() && moved)
+                                || (response.has_focus() && !down && !up)
+                            {
                                 palette.selected = row;
+                            }
+                            if row == palette.selected && (down || up) && !search.has_focus() {
+                                response.request_focus();
                             }
                             if response.clicked() {
                                 chosen = Some(i);
                             }
                             if row == palette.selected {
                                 ui.painter().rect_filled(rect, RADIUS, colors.selected);
+                            }
+                            response.widget_info(|| {
+                                egui::WidgetInfo::selected(
+                                    egui::WidgetType::SelectableLabel,
+                                    ui.is_enabled(),
+                                    row == palette.selected,
+                                    format!(
+                                        "{}, {}: {}",
+                                        snippet.name,
+                                        if snippet.run { "runs" } else { "types" },
+                                        snippet.command
+                                    ),
+                                )
+                            });
+                            if row == palette.selected {
+                                ctx.accesskit_node_builder(search.id, |node| {
+                                    node.set_active_descendant(response.id.value().into())
+                                });
+                            }
+                            if response.has_focus() {
+                                ui.painter().rect_stroke(
+                                    rect,
+                                    RADIUS,
+                                    Stroke::new(1_f32, colors.accent),
+                                    egui::StrokeKind::Inside,
+                                );
                             }
                             let mut text = ui.new_child(
                                 UiBuilder::new()

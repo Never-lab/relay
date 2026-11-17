@@ -941,7 +941,43 @@ fn header(ui: &mut egui::Ui, files: &mut Browser, columns: &Columns, width: f32)
         let cell = Rect::from_min_size(egui::pos2(x, rect.min.y), Vec2::new(w, rect.height()));
         x += w + COLUMN_GAP;
         let active = sort.is_some_and(|s| s == files.view.sort);
-        let response = ui.interact(cell, ui.id().with(("files-sort", title)), Sense::click());
+        let response = ui.interact(
+            cell,
+            ui.id().with(("files-sort", title)),
+            if sort.is_some() {
+                Sense::click()
+            } else {
+                Sense::hover()
+            },
+        );
+        if sort.is_some() {
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Button,
+                    ui.is_enabled(),
+                    format!("Sort by {title}"),
+                )
+            });
+            ui.ctx().accesskit_node_builder(response.id, |node| {
+                if active {
+                    node.set_sort_direction(if files.view.descending {
+                        egui::accesskit::SortDirection::Descending
+                    } else {
+                        egui::accesskit::SortDirection::Ascending
+                    });
+                } else {
+                    node.clear_sort_direction();
+                }
+            });
+            if response.has_focus() {
+                ui.painter().rect_stroke(
+                    cell,
+                    RADIUS_SMALL,
+                    Stroke::new(1_f32, colors.accent),
+                    egui::StrokeKind::Inside,
+                );
+            }
+        }
         let color = if active || response.hovered() {
             colors.text
         } else {

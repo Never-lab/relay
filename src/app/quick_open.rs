@@ -155,8 +155,13 @@ impl App {
                         for (row, &choice) in rows.iter().enumerate() {
                             let (rect, response) =
                                 ui.allocate_exact_size(Vec2::new(width, 32.), Sense::click());
-                            if response.hovered() && moved {
+                            if (response.hovered() && moved)
+                                || (response.has_focus() && !down && !up)
+                            {
                                 open.selected = row;
+                            }
+                            if row == open.selected && (down || up) && !search.has_focus() {
+                                response.request_focus();
                             }
                             if response.clicked() {
                                 chosen = Some(choice);
@@ -183,6 +188,27 @@ impl App {
                             } else {
                                 format!("{}@{}", c.username, c.address())
                             };
+                            response.widget_info(|| {
+                                egui::WidgetInfo::selected(
+                                    egui::WidgetType::SelectableLabel,
+                                    ui.is_enabled(),
+                                    row == open.selected,
+                                    format!("{title}, {}, {address}", c.protocol.label()),
+                                )
+                            });
+                            if row == open.selected {
+                                ctx.accesskit_node_builder(search.id, |node| {
+                                    node.set_active_descendant(response.id.value().into())
+                                });
+                            }
+                            if response.has_focus() {
+                                ui.painter().rect_stroke(
+                                    rect,
+                                    RADIUS,
+                                    Stroke::new(1_f32, colors.accent),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
                             let mut line = ui.new_child(
                                 UiBuilder::new()
                                     .max_rect(rect.shrink2(Vec2::new(10., 0.)))

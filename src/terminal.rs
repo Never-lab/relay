@@ -602,6 +602,18 @@ impl Terminal {
         let selection = self
             .selection
             .map(|(a, b)| if a <= b { (a, b) } else { (b, a) });
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Other,
+                ui.is_enabled(),
+                format!(
+                    "{} terminal{}",
+                    self.kind,
+                    if self.ended { ", session ended" } else { "" }
+                ),
+            )
+        });
+        accessible_screen(ui, &response, screen, selection, content.min, &font);
         let selected = |row: u16, col: u16| {
             selection.is_some_and(|(start, end)| (row, col) >= start && (row, col) <= end)
         };
@@ -856,6 +868,72 @@ impl Terminal {
     }
 }
 
+/// Mirror the painted screen only while assistive technology requests the tree.
+fn accessible_screen(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    screen: &vt100::Screen,
+    selection: Option<((u16, u16), (u16, u16))>,
+    origin: Pos2,
+    font: &FontId,
+) {
+    if ui
+        .ctx()
+        .accesskit_node_builder(response.id, |_| ())
+        .is_none()
+    {
+        return;
+    }
+    let (_, cols) = screen.size();
+    let lines: Vec<_> = screen.rows(0, cols).collect();
+    let index = |(row, col): (u16, u16)| {
+        let row = usize::from(row).min(lines.len().saturating_sub(1));
+        let before: usize = lines[..row]
+            .iter()
+            .map(|line| line.chars().count() + 1)
+            .sum();
+        let column = screen
+            .rows(0, col.min(cols))
+            .nth(row)
+            .unwrap_or_default()
+            .chars()
+            .count();
+        egui::text::CCursor::new(before + column.min(lines[row].chars().count()))
+    };
+    let range = if let Some((start, end)) = selection {
+        Some(egui::text_selection::CCursorRange::two(
+            index(start),
+            index((end.0, end.1.saturating_add(1))),
+        ))
+    } else if screen.scrollback() == 0 && !screen.hide_cursor() {
+        Some(egui::text_selection::CCursorRange::one(index(
+            screen.cursor_position(),
+        )))
+    } else {
+        None
+    };
+    let galley =
+        ui.fonts_mut(|fonts| fonts.layout_no_wrap(lines.join("\n"), font.clone(), Color32::WHITE));
+    egui::text_selection::accesskit_text::update_accesskit_for_text_widget(
+        ui.ctx(),
+        response.id,
+        range,
+        egui::accesskit::Role::Terminal,
+        egui::emath::TSTransform::from_translation(origin.to_vec2()),
+        &galley,
+    );
+    // Scrolling history or another tab must not speak over the active task.
+    let live = if response.has_focus() && screen.scrollback() == 0 {
+        egui::accesskit::Live::Polite
+    } else {
+        egui::accesskit::Live::Off
+    };
+    ui.ctx().accesskit_node_builder(response.id, |node| {
+        node.set_live(live);
+        node.clear_live_atomic();
+    });
+}
+
 impl Terminal {
     /// The font size after this frame's zooming: Ctrl+Plus, Ctrl+Minus and Ctrl+0 (Cmd on
     /// macOS) while the terminal has the keyboard, and Ctrl with the wheel over it. Sizes are
@@ -933,8 +1011,19 @@ fn search_bar(
     // Drawn with lines, as the interface font has no arrows.
     let button = |ui: &mut egui::Ui, points: &[[f32; 2]], hint: &str| {
         let (rect, response) = ui.allocate_exact_size(Vec2::splat(22.), Sense::click());
-        if response.hovered() {
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), hint)
+        });
+        if response.hovered() || response.has_focus() {
             ui.painter().rect_filled(rect, 4., pal.border);
+        }
+        if response.has_focus() {
+            ui.painter().rect_stroke(
+                rect,
+                4.,
+                Stroke::new(1_f32, pal.title_text),
+                egui::StrokeKind::Inside,
+            );
         }
         let stroke = Stroke::new(1.5_f32, pal.title_text);
         let point = |[x, y]: [f32; 2]| rect.center() + Vec2::new(x, y);
@@ -971,6 +1060,8 @@ fn search_bar(
             .desired_width(ui.available_width().min(200.))
             .margin(egui::Margin::symmetric(6, 2)),
     );
+    ui.ctx()
+        .accesskit_node_builder(field.id, |node| node.set_label("Find in terminal output"));
     if std::mem::take(&mut search.focus) {
         field.request_focus();
         // Selecting the query lets typing replace it.
@@ -1196,6 +1287,70 @@ mod tests {
         sync::{Arc, Mutex},
         time::Instant,
     };
+
+    #[test]
+    fn accessible_terminal_exposes_unicode_selection_cursor_and_quiet_history() {
+        for (select, history) in [(true, false), (false, false), (false, true)] {
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            let mut parser = vt100::Parser::new(4, 32, 10);
+            parser.process("prompt café 界\r\nnext".as_bytes());
+            if history {
+                parser.process(b"\r\n1\r\n2\r\n3\r\n4");
+                parser.screen_mut().set_scrollback(1);
+            }
+            let output = ctx.run(Default::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let (rect, response) =
+                        ui.allocate_exact_size(Vec2::new(500., 200.), Sense::click());
+                    response.request_focus();
+                    accessible_screen(
+                        ui,
+                        &response,
+                        parser.screen(),
+                        select.then_some(((0, 7), (0, 13))),
+                        rect.min,
+                        &FontId::monospace(14.),
+                    );
+                });
+            });
+            let update = output.platform_output.accesskit_update.unwrap();
+            let (_, terminal) = update
+                .nodes
+                .iter()
+                .find(|(_, node)| node.role() == egui::accesskit::Role::Terminal)
+                .unwrap();
+            assert_eq!(
+                terminal.live(),
+                Some(if history {
+                    egui::accesskit::Live::Off
+                } else {
+                    egui::accesskit::Live::Polite
+                })
+            );
+            if history {
+                assert!(terminal.text_selection().is_none());
+            } else {
+                assert!(
+                    update
+                        .nodes
+                        .iter()
+                        .any(|(_, node)| node.value() == Some("prompt café 界\n"))
+                );
+                let range = terminal.text_selection().unwrap();
+                if select {
+                    assert_eq!(range.anchor.character_index, 7);
+                    assert_eq!(range.focus.character_index, 13);
+                } else {
+                    assert_eq!(range.anchor, range.focus);
+                    assert_eq!(range.focus.character_index, 4);
+                    assert!(update.nodes.iter().any(
+                        |(id, node)| *id == range.focus.node && node.value() == Some("next\n")
+                    ));
+                }
+            }
+        }
+    }
 
     #[cfg(unix)]
     #[test]

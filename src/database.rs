@@ -142,7 +142,7 @@ fn spawn<T: Send + 'static>(
 
 /// Sends what `job` returns, then wakes the UI to collect it. A panicking job wakes it too,
 /// once its channel has closed, so the stopped worker is noticed without another event.
-fn run<T>(ctx: &eframe::egui::Context, tx: Sender<T>, job: impl FnOnce() -> T) {
+pub(crate) fn run<T>(ctx: &eframe::egui::Context, tx: Sender<T>, job: impl FnOnce() -> T) {
     struct Wake<'a>(&'a eframe::egui::Context);
     impl Drop for Wake<'_> {
         fn drop(&mut self) {

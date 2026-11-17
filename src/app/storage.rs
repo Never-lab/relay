@@ -140,8 +140,11 @@ impl App {
         for s in &mut self.sessions {
             s.place(None);
         }
-        if let Some(path) = file_dialog::choose(self.parent, file_dialog::Kind::ImportCsv).first() {
-            self.review(csv_io::read(path, &self.connections));
+        if let Some(path) = file_dialog::choose(self.parent, file_dialog::Kind::ImportCsv)
+            .into_iter()
+            .next()
+        {
+            self.start_import(move |existing| csv_io::read(&path, existing));
         }
     }
 
@@ -150,20 +153,25 @@ impl App {
         for s in &mut self.sessions {
             s.place(None);
         }
-        if let Some(path) = file_dialog::choose(self.parent, file_dialog::Kind::ImportJson).first()
+        if let Some(path) = file_dialog::choose(self.parent, file_dialog::Kind::ImportJson)
+            .into_iter()
+            .next()
         {
-            self.review(json_io::read(path, &self.connections));
+            self.start_import(move |existing| json_io::read(&path, existing));
         }
     }
 
     /// Imports the user's OpenSSH configuration for review.
     pub(super) fn import_ssh_config(&mut self) {
         match import::ssh_config_path() {
-            Some(path) if path.exists() => {
-                self.review(import::read_ssh_config(&path, &self.connections));
-            }
             Some(path) => {
-                self.error = Some(format!("There is no SSH config at {}.", path.display()));
+                self.start_import(move |existing| {
+                    if path.exists() {
+                        import::read_ssh_config(&path, existing)
+                    } else {
+                        Err(format!("There is no SSH config at {}.", path.display()))
+                    }
+                });
             }
             None => self.error = Some("Cannot find your user profile folder.".into()),
         }
@@ -178,20 +186,51 @@ impl App {
         if paths.is_empty() {
             return;
         }
-        let files: Result<Vec<_>, String> = paths
-            .iter()
-            .map(|path| {
-                let name = path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into();
-                std::fs::read(path)
-                    .map(|bytes| (name, bytes))
-                    .map_err(|e| format!("Cannot read {}: {e}", path.display()))
-            })
-            .collect();
-        self.review(files.and_then(|files| import::rdp_files(&files, &self.connections)));
+        self.start_import(move |existing| {
+            let files: Result<Vec<_>, String> = paths
+                .iter()
+                .map(|path| {
+                    let name = path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into();
+                    std::fs::read(path)
+                        .map(|bytes| (name, bytes))
+                        .map_err(|e| format!("Cannot read {}: {e}", path.display()))
+                })
+                .collect();
+            files.and_then(|files| import::rdp_files(&files, existing))
+        });
+    }
+
+    pub(super) fn start_import(
+        &mut self,
+        load: impl FnOnce(&[Connection]) -> Result<csv_io::Import, String> + Send + 'static,
+    ) {
+        if self.pending.is_some() || matches!(self.modal, Modal::Importing(_)) {
+            self.notify("Wait for the current library operation to finish.");
+            return;
+        }
+        let existing = self.connections.clone();
+        let ctx = self.ctx.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || database::run(&ctx, tx, || load(&existing)));
+        self.error = None;
+        self.modal = Modal::Importing(rx);
+    }
+
+    pub(super) fn poll_import(&mut self) {
+        let Modal::Importing(rx) = &self.modal else {
+            return;
+        };
+        let result = match rx.try_recv() {
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("The import worker stopped unexpectedly. No connections were imported. Try importing again.".into()),
+            Ok(result) => result,
+        };
+        self.modal = Modal::None;
+        self.review(result);
     }
 
     /// Shows an import for review before anything is saved.
@@ -241,6 +280,23 @@ impl App {
     pub(super) fn library_dialogs(&mut self, ctx: &egui::Context) {
         let colors = theme::palette(ctx);
         let escape = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        if matches!(self.modal, Modal::Importing(_)) {
+            let mut cancel = false;
+            dialog("reading-import", ctx).show(ctx, |ui| {
+                ui.set_width(dialog_width(ctx, 360.));
+                ui.heading("Reading connections…");
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Preparing the import for review.");
+                });
+                ui.add_space(12.);
+                cancel = outline_button(ui, "Cancel", 80.).clicked();
+            });
+            if cancel || escape {
+                // Dropping the receiver discards the result without changing the library.
+                self.modal = Modal::None;
+            }
+        }
         if matches!(self.modal, Modal::Library) {
             let mut open = false;
             let mut cancel = false;
@@ -459,40 +515,77 @@ impl App {
             dialog("import", ctx).show(ctx, |ui| {
                 ui.set_width(dialog_width(ctx, 680.));
                 ui.heading("Review import");
-                ui.label(
-                    RichText::new(format!(
-                        "{}, into the {}",
-                        import.filename,
-                        self.location.label()
-                    ))
-                    .color(colors.muted),
-                );
+                let detail = format!("{}, into the {}", import.filename, self.location.label());
+                ui.add(egui::Label::new(RichText::new(&detail).color(colors.muted)).truncate())
+                    .on_hover_text(detail);
                 ui.add_space(16.);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.colored_label(
                         colors.accent,
                         format!("{} ready to import", import.connections.len()),
                     );
-                    ui.label(format!("{} duplicates", import.duplicates));
+                    ui.label(format!(
+                        "{} {}",
+                        import.duplicates,
+                        if import.duplicates == 1 {
+                            "duplicate"
+                        } else {
+                            "duplicates"
+                        }
+                    ));
                     ui.colored_label(
-                        ui.visuals().warn_fg_color,
+                        if import.skipped.is_empty() {
+                            colors.muted
+                        } else {
+                            ui.visuals().warn_fg_color
+                        },
                         format!("{} skipped", import.skipped.len()),
                     );
                 });
                 ui.add_space(12.);
+                let row_height = ui
+                    .spacing()
+                    .interact_size
+                    .y
+                    .max(ui.text_style_height(&egui::TextStyle::Body));
                 egui::ScrollArea::vertical()
                     .id_salt("import-preview")
+                    .auto_shrink([false, true])
                     .max_height((ctx.content_rect().height() - 380.).clamp(100., 260.))
-                    .show(ui, |ui| {
-                        for c in &import.connections {
+                    .show_rows(ui, row_height, import.connections.len(), |ui, range| {
+                        for c in &import.connections[range] {
                             ui.horizontal(|ui| {
+                                ui.set_min_height(row_height);
                                 protocol_badge(ui, c.protocol);
-                                ui.add(egui::Label::new(&c.name).truncate());
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(&c.group).size(11.).color(colors.muted),
-                                    )
-                                    .truncate(),
+                                let group_width = (ui.available_width() * 0.28).min(160.);
+                                let name_width = (ui.available_width()
+                                    - group_width
+                                    - ui.spacing().item_spacing.x)
+                                    .max(0.);
+                                ui.allocate_ui_with_layout(
+                                    Vec2::new(name_width, row_height),
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        ui.set_min_size(Vec2::new(name_width, row_height));
+                                        ui.add(egui::Label::new(&c.name).truncate())
+                                            .on_hover_text(&c.name);
+                                    },
+                                );
+                                ui.allocate_ui_with_layout(
+                                    Vec2::new(group_width, row_height),
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        ui.set_min_size(Vec2::new(group_width, row_height));
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(&c.group)
+                                                    .size(11.)
+                                                    .color(colors.muted),
+                                            )
+                                            .truncate(),
+                                        )
+                                        .on_hover_text(&c.group);
+                                    },
                                 );
                             });
                         }
@@ -518,8 +611,22 @@ impl App {
                     .size(12.)
                     .color(colors.muted),
                 );
+                if let Some(error) = &self.error {
+                    ui.add(
+                        egui::Label::new(RichText::new(error).color(ui.visuals().error_fg_color))
+                            .wrap(),
+                    );
+                }
                 ui.horizontal(|ui| {
-                    let label = format!("Import {} connections", import.connections.len());
+                    let count = import.connections.len();
+                    let label = format!(
+                        "Import {count} {}",
+                        if count == 1 {
+                            "connection"
+                        } else {
+                            "connections"
+                        }
+                    );
                     let button = egui::Button::new(RichText::new(label).color(colors.bg).strong())
                         .fill(colors.accent)
                         .min_size(Vec2::new(0., CONTROL_HEIGHT));

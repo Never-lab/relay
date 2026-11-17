@@ -396,6 +396,14 @@ pub(super) fn library_tab(ui: &mut egui::Ui, selected: bool) -> egui::Response {
         egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, "Library")
     });
     tab_background(ui, rect, selected, response.hovered());
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            rect,
+            RADIUS,
+            Stroke::new(1_f32, colors.accent),
+            egui::StrokeKind::Inside,
+        );
+    }
     icons::paint_sized(
         ui.painter(),
         Icon::Library,
@@ -510,6 +518,14 @@ pub(super) fn session_tab(
     select.widget_info(|| {
         egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, label)
     });
+    if select.has_focus() {
+        ui.painter().rect_stroke(
+            select_rect,
+            RADIUS,
+            Stroke::new(1_f32, colors.accent),
+            egui::StrokeKind::Inside,
+        );
+    }
     ui.painter().galley(
         egui::pos2(rect.left() + 30., rect.center().y - galley.size().y / 2.),
         galley,
@@ -520,10 +536,18 @@ pub(super) fn session_tab(
         egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Close {label}"))
     });
     // The close button shows on the selected tab and under the pointer, as in browsers.
-    if selected || hovered {
-        if close.hovered() {
+    if selected || hovered || close.has_focus() {
+        if close.hovered() || close.has_focus() {
             ui.painter()
                 .rect_filled(close_rect, RADIUS_SMALL, colors.hover);
+        }
+        if close.has_focus() {
+            ui.painter().rect_stroke(
+                close_rect,
+                RADIUS_SMALL,
+                Stroke::new(1_f32, colors.accent),
+                egui::StrokeKind::Inside,
+            );
         }
         icons::paint_sized(
             ui.painter(),

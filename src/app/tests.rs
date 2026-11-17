@@ -52,6 +52,212 @@ fn test_app(ctx: &egui::Context) -> App {
 }
 
 #[test]
+fn large_import_preview_work_is_bounded() {
+    let ctx = egui::Context::default();
+    apply_style(&ctx);
+    let mut app = test_app(&ctx);
+    let path = std::env::temp_dir().join(model::temp_name("relay-import.csv"));
+    let mut csv = String::from("Name,Host,Protocol\n");
+    for i in 0..10_000 {
+        csv.push_str(&format!("Machine {i},node-{i}.example.com,SSH\n"));
+    }
+    std::fs::write(&path, csv).unwrap();
+    let started = Instant::now();
+    let read_path = path.clone();
+    app.start_import(move |existing| csv_io::read(&read_path, existing));
+    let scheduled = started.elapsed();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while matches!(app.modal, Modal::Importing(_)) {
+        assert!(Instant::now() < deadline, "import did not finish");
+        app.poll_import();
+        std::thread::yield_now();
+    }
+    let read = started.elapsed();
+    std::fs::remove_file(&path).unwrap();
+    assert!(matches!(&app.modal, Modal::Import(import) if import.connections.len() == 10_000));
+    let started = Instant::now();
+    let output = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(
+                egui::Pos2::ZERO,
+                Vec2::new(1280., 800.),
+            )),
+            ..Default::default()
+        },
+        |ctx| app.library_dialogs(ctx),
+    );
+    eprintln!(
+        "10,000 connections: UI scheduling {scheduled:?}; background read/parse {read:?}; preview frame {:?}; {} shapes",
+        started.elapsed(),
+        output.shapes.len()
+    );
+    assert!(output.shapes.len() < 500, "preview drew off-screen rows");
+    assert_eq!(app.connections.len(), 3, "review never commits the import");
+}
+
+#[test]
+fn import_review_aligns_columns_and_keeps_errors_and_actions_visible() {
+    for theme in theme::Theme::ALL {
+        for (viewport, zoom) in [
+            (Vec2::new(1280., 800.), 1.),
+            (Vec2::new(720., 560.), 1.),
+            (Vec2::new(1200., 900.), 2.),
+        ] {
+            for count in [1, 2] {
+                let ctx = egui::Context::default();
+                ctx.enable_accesskit();
+                apply_style(&ctx);
+                theme.apply(&ctx);
+                ctx.options_mut(|options| options.zoom_factor = zoom);
+                let mut app = test_app(&ctx);
+                let mut connections = app.connections[..count].to_vec();
+                connections[0].name = "A very long connection name ".repeat(12);
+                connections[0].group = "Office".into();
+                if count == 2 {
+                    connections[1].group = "Infrastructure".into();
+                }
+                app.modal = Modal::Import(csv_io::Import {
+                    connections,
+                    skipped: vec![],
+                    duplicates: 1,
+                    filename: format!("{}.csv", "long-file-name-".repeat(30)),
+                });
+                let error = "The library changed. Refresh before importing again.";
+                app.error = Some(error.into());
+                let screen = Rect::from_min_size(egui::Pos2::ZERO, viewport / zoom);
+                let mut output = egui::FullOutput::default();
+                for _ in 0..3 {
+                    output = ctx.run(
+                        egui::RawInput {
+                            screen_rect: Some(screen),
+                            ..Default::default()
+                        },
+                        |ctx| app.library_dialogs(ctx),
+                    );
+                }
+                let modal = ctx
+                    .memory(|m| m.area_rect(egui::Id::new("import")))
+                    .unwrap();
+                assert!(
+                    screen.contains_rect(modal),
+                    "{theme:?} at {screen:?}: {modal:?}"
+                );
+                let action = if count == 1 {
+                    "Import 1 connection"
+                } else {
+                    "Import 2 connections"
+                };
+                for label in ["Review import", "1 duplicate", error, action, "Cancel"] {
+                    assert!(
+                        output.shapes.iter().any(|shape| matches!(&shape.shape,
+                            egui::Shape::Text(text) if text.galley.text() == label
+                            && shape.clip_rect.contains_rect(text.visual_bounding_rect())
+                            && screen.contains_rect(text.visual_bounding_rect())
+                        )),
+                        "{theme:?} at {screen:?}: {label} clipped or missing"
+                    );
+                }
+                if count == 2 {
+                    let left = |label| {
+                        output
+                            .shapes
+                            .iter()
+                            .find_map(|shape| match &shape.shape {
+                                egui::Shape::Text(text) if text.galley.text() == label => {
+                                    Some(text.pos.x)
+                                }
+                                _ => None,
+                            })
+                            .unwrap()
+                    };
+                    assert!((left("Office") - left("Infrastructure")).abs() < 1.);
+                }
+                assert!(app.pending.is_none());
+            }
+        }
+    }
+}
+
+#[test]
+fn a_slow_import_renders_and_cancel_discards_its_late_result() {
+    let ctx = egui::Context::default();
+    let mut app = test_app(&ctx);
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    app.start_import(move |existing| {
+        entered_tx.send(std::thread::current().id()).unwrap();
+        release_rx.recv().unwrap();
+        let result = csv_io::read(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(csv_io::FIXTURE),
+            existing,
+        );
+        finished_tx.send(()).unwrap();
+        result
+    });
+    assert_ne!(
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+        std::thread::current().id()
+    );
+    app.poll_import();
+    assert!(matches!(app.modal, Modal::Importing(_)));
+    let output = ctx.run(egui::RawInput::default(), |ctx| app.library_dialogs(ctx));
+    assert!(
+        !output.shapes.is_empty(),
+        "UI paints while the read is blocked"
+    );
+    let _ = ctx.run(
+        egui::RawInput {
+            events: vec![press(egui::Key::Escape)],
+            ..Default::default()
+        },
+        |ctx| app.library_dialogs(ctx),
+    );
+    assert!(matches!(app.modal, Modal::None));
+    app.start_import(|_| Err("new import error".into()));
+    release_tx.send(()).unwrap();
+    finished_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while matches!(app.modal, Modal::Importing(_)) {
+        assert!(Instant::now() < deadline);
+        app.poll_import();
+        std::thread::yield_now();
+    }
+    assert!(matches!(app.modal, Modal::None));
+    assert_eq!(app.error.as_deref(), Some("new import error"));
+    assert_eq!(app.connections.len(), 3);
+    assert!(app.pending.is_none(), "no import was saved");
+}
+
+#[test]
+fn import_errors_and_worker_panics_leave_the_library_unchanged() {
+    for panics in [false, true] {
+        let ctx = egui::Context::default();
+        let mut app = test_app(&ctx);
+        app.start_import(move |_| {
+            if panics {
+                panic!("import reader failed");
+            }
+            Err("Cannot read the selected file".into())
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while matches!(app.modal, Modal::Importing(_)) {
+            assert!(Instant::now() < deadline);
+            app.poll_import();
+            std::thread::yield_now();
+        }
+        assert!(matches!(app.modal, Modal::None));
+        assert!(app.error.as_deref().unwrap().contains(if panics {
+            "worker stopped"
+        } else {
+            "Cannot read"
+        }));
+        assert_eq!(app.connections.len(), 3);
+        assert!(app.pending.is_none() && app.recovery.is_none());
+    }
+}
+
+#[test]
 fn an_existing_personal_library_can_save_after_startup() {
     let ctx = egui::Context::default();
     let original = test_app(&ctx);
@@ -1355,6 +1561,48 @@ fn tab_close_is_inside_tab_and_does_not_select_it() {
 }
 
 #[test]
+fn inactive_tab_close_is_visible_and_outlined_on_keyboard_focus() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut close_id = egui::Id::NULL;
+    for step in 0..3 {
+        if step > 0 {
+            ctx.memory_mut(|m| m.request_focus(close_id));
+        }
+        let mut closed = false;
+        let output = ctx.run(
+            egui::RawInput {
+                events: if step == 2 {
+                    vec![press(egui::Key::Enter)]
+                } else {
+                    vec![]
+                },
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let tab = session_tab(
+                        ui,
+                        &Connection::new(),
+                        Kind::Session,
+                        session::TabState::Open,
+                        Look::Tab { selected: false },
+                    );
+                    close_id = tab.inner.1.id;
+                    closed = tab.inner.1.clicked();
+                });
+            },
+        );
+        if step == 1 {
+            assert!(output.shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.rect.size() == Vec2::splat(20.) && r.stroke.color == theme::palette(&ctx).accent && r.stroke.width > 0.)));
+        }
+        if step == 2 {
+            assert!(closed, "focused close activates with Enter");
+        }
+    }
+}
+
+#[test]
 fn navigation_and_theme_clicks_include_label_and_both_edges() {
     for (theme_row, x) in [
         (false, 18.),
@@ -2214,6 +2462,164 @@ fn navigation_exposes_names_selection_and_keyboard_activation() {
             },
         );
         assert!(activated, "navigation did not activate with Enter");
+    }
+}
+
+#[cfg(feature = "ui-check")]
+#[test]
+fn captures_start_without_profile_credentials_or_pending_connections() {
+    let app = ui_check::new(egui::Context::default(), None);
+    assert!(app.state_path.is_none());
+    assert!(app.path.as_os_str().is_empty());
+    assert!(app.pending.is_none() && app.pending_location.is_none() && app.sync.is_none());
+    assert!(!app.db_mssql.remember && !app.db_mysql.remember);
+    assert!(!app.server_remembered);
+    assert!(app.state.open.is_empty());
+    assert!(app.error.is_none() && app.notice.is_none());
+    assert!(!app.storage_ok, "fixtures cannot save a real library");
+    assert!(
+        app.connections
+            .iter()
+            .any(|c| c.host == "build.example.com")
+    );
+}
+
+#[test]
+fn palettes_expose_named_choices_and_keyboard_selection() {
+    for snippets in [false, true] {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = test_app(&ctx);
+        if snippets {
+            let connection = app.connections[0].clone();
+            app.sessions
+                .push(Session::scripted(connection, "exit 0", ctx.clone()));
+            app.activate_session(0);
+            app.state.snippets = ["Alpha", "Bravo"]
+                .map(|name| state::Snippet {
+                    name: name.into(),
+                    command: format!("echo {name}"),
+                    run: false,
+                })
+                .to_vec();
+            app.palette = Some(Palette::default());
+        } else {
+            app.open_quick();
+        }
+        let mut first_result = None;
+        for step in 0..6 {
+            let output = ctx.run(
+                egui::RawInput {
+                    events: match step {
+                        2 | 4 => vec![press(egui::Key::ArrowDown)],
+                        3 => vec![egui::Event::AccessKitActionRequest(
+                            egui::accesskit::ActionRequest {
+                                action: egui::accesskit::Action::Focus,
+                                target: first_result.unwrap(),
+                                data: None,
+                            },
+                        )],
+                        5 => vec![press(egui::Key::ArrowUp)],
+                        _ => vec![],
+                    },
+                    ..Default::default()
+                },
+                |ctx| {
+                    if snippets {
+                        app.snippet_palette(ctx);
+                    } else {
+                        app.quick_open(ctx);
+                    }
+                },
+            );
+            if step == 0 {
+                continue;
+            }
+            let update = output.platform_output.accesskit_update.unwrap();
+            let name = if step == 2 || step == 4 {
+                "Bravo"
+            } else {
+                "Alpha"
+            };
+            let (selected, node) = update
+                .nodes
+                .iter()
+                .find(|(_, node)| {
+                    node.toggled() == Some(egui::accesskit::Toggled::True)
+                        && node.label().is_some_and(|label| label.starts_with(name))
+                })
+                .expect("named, selected result");
+            if step == 1 {
+                first_result = Some(*selected);
+            }
+            assert!(node.label().unwrap().contains(if snippets {
+                "types: echo"
+            } else {
+                ".example"
+            }));
+            assert!(
+                update
+                    .nodes
+                    .iter()
+                    .any(|(_, node)| node.active_descendant() == Some(*selected))
+            );
+        }
+    }
+}
+
+#[test]
+fn file_sort_headers_expose_names_direction_and_keyboard_activation() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut app = files_app(&ctx);
+    let mut sort_id = None;
+    for step in 0..4 {
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(1200., 800.),
+                )),
+                events: match step {
+                    1 => vec![egui::Event::AccessKitActionRequest(
+                        egui::accesskit::ActionRequest {
+                            action: egui::accesskit::Action::Focus,
+                            target: sort_id.unwrap(),
+                            data: None,
+                        },
+                    )],
+                    2 => vec![press(egui::Key::Enter)],
+                    _ => vec![],
+                },
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.files_pane(ui, 0));
+            },
+        );
+        let update = output.platform_output.accesskit_update.unwrap();
+        let (id, node) = update
+            .nodes
+            .iter()
+            .find(|(_, node)| node.label() == Some("Sort by NAME"))
+            .unwrap();
+        sort_id = Some(*id);
+        if step == 0 {
+            assert_eq!(
+                node.sort_direction(),
+                Some(egui::accesskit::SortDirection::Ascending)
+            );
+        }
+        if step == 1 {
+            assert_eq!(update.focus, *id);
+            assert!(output.shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.stroke.color == theme::palette(&ctx).accent && r.stroke.width > 0.)));
+        }
+        if step == 3 {
+            assert_eq!(
+                node.sort_direction(),
+                Some(egui::accesskit::SortDirection::Descending)
+            );
+        }
     }
 }
 

@@ -76,6 +76,8 @@ RELAY_UI_CHECK=assets/screenshot-terminal.png RELAY_UI_TERMINAL=1 cargo run --fe
 RELAY_UI_CHECK=assets/screenshot-files.png RELAY_UI_FILES=1 RELAY_UI_SPLIT=1 cargo run --features ui-check
 ```
 
+Use `RELAY_UI_IMPORT=loading` to capture the import loading dialog instead of its review, or `=error` for a confirmation error.
+
 ## Icon
 
 `assets/make_icon.py` (Python with Pillow) draws the icon. Run `python -I assets/make_icon.py` to regenerate `assets/icon.ico`, which `build.rs` embeds in the Windows executable, `assets/icon.png`, used for the macOS and Linux packages, and `assets/icon.rgba`, which Relay uses for its window icon.

@@ -55,13 +55,7 @@ pub fn run() -> eframe::Result {
             wgpu_options: gpu_options(),
             ..Default::default()
         },
-        Box::new(|cc| {
-            #[allow(unused_mut)]
-            let mut app = App::new(cc);
-            #[cfg(feature = "ui-check")]
-            ui_check::seed(&mut app);
-            Ok(Box::new(app))
-        }),
+        Box::new(|cc| Ok(Box::new(App::new(cc)))),
     )
 }
 
@@ -89,6 +83,7 @@ enum Modal {
     Settings,
     Shortcuts,
     Library,
+    Importing(std::sync::mpsc::Receiver<Result<csv_io::Import, String>>),
     Import(csv_io::Import),
 }
 
@@ -258,6 +253,10 @@ struct Palette {
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        #[cfg(feature = "ui-check")]
+        if std::env::var_os("RELAY_UI_CHECK").is_some() {
+            return ui_check::new(cc.egui_ctx.clone(), platform::Window::of(cc));
+        }
         cc.egui_ctx.set_theme(egui::Theme::Dark);
         let state_path = state::path();
         let saved = state::load(&state_path);
@@ -1381,6 +1380,7 @@ impl eframe::App for App {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_storage();
+        self.poll_import();
         self.sync_library(ctx);
         if let Some(connection) = self.connect_request.take() {
             let admin = std::mem::take(&mut self.connect_admin);
