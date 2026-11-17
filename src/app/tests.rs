@@ -624,12 +624,7 @@ fn session_panes_keep_remote_identity_visible_and_loading_guidance_relevant() {
             if protocol == Protocol::Vnc {
                 c.host = format!("{}.example", "long-host-".repeat(20));
             }
-            let identity = format!(
-                "{} · deploy@{}:{}",
-                protocol.label(),
-                c.host,
-                protocol.port()
-            );
+            let identity = format!("deploy@{}:{}", c.host, protocol.port());
             let mut session = session::Session::restored(c, false, ctx.clone());
             session.started = Instant::now() - Duration::from_secs(21);
             app.sessions.push(session);
@@ -638,19 +633,22 @@ fn session_panes_keep_remote_identity_visible_and_loading_guidance_relevant() {
                     session_pane_frame(&mut app, &ctx, pane, Vec2::new(width, 600.), vec![]);
                 let update = output.platform_output.accesskit_update.unwrap();
                 let shown = |text: &str| update.nodes.iter().any(|(_, n)| n.value() == Some(text));
-                assert!(shown(&identity));
-                let (_, identity_node) = update
-                    .nodes
-                    .iter()
-                    .find(|(_, n)| {
-                        n.role() == egui::accesskit::Role::Label && n.value() == Some(&identity)
-                    })
-                    .unwrap();
-                let bounds = identity_node.bounds().unwrap();
-                assert!(
-                    bounds.x0 >= 0. && bounds.x1 <= f64::from(width),
-                    "remote identity overflowed"
-                );
+                if pane == Pane::Main {
+                    assert!(!shown(&identity), "main pane added a separate identity row");
+                } else {
+                    let (_, identity_node) = update
+                        .nodes
+                        .iter()
+                        .find(|(_, n)| {
+                            n.role() == egui::accesskit::Role::Label && n.value() == Some(&identity)
+                        })
+                        .unwrap();
+                    let bounds = identity_node.bounds().unwrap();
+                    assert!(
+                        bounds.x0 >= 0. && bounds.x1 <= f64::from(width),
+                        "remote identity overflowed"
+                    );
+                }
                 assert!(shown(
                     "Still connecting. Check that the host is reachable, or close this tab to cancel."
                 ));
@@ -668,6 +666,48 @@ fn session_panes_keep_remote_identity_visible_and_loading_guidance_relevant() {
                     )),
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn single_session_identity_uses_the_existing_tab_bar() {
+    for width in [400., 760., 1100.] {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = test_app(&ctx);
+        app.connections[0].username = "deploy".into();
+        app.sessions.push(session::Session::restored(
+            app.connections[0].clone(),
+            false,
+            ctx.clone(),
+        ));
+        app.sync_tabs();
+        app.select_tab(1);
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(width, 600.),
+                )),
+                ..Default::default()
+            },
+            |ctx| app.tabs(ctx),
+        );
+        let update = output.platform_output.accesskit_update.unwrap();
+        let identity = update.nodes.iter().find(|(_, n)| {
+            n.role() == egui::accesskit::Role::Label
+                && n.value() == Some("deploy@alpha.example:3389")
+        });
+        if width >= 760. {
+            let bounds = identity.unwrap().1.bounds().unwrap();
+            assert!(bounds.y0 >= 0. && bounds.y1 <= f64::from(BAR_HEIGHT));
+            assert!(bounds.x0 >= 0. && bounds.x1 <= f64::from(width));
+        } else {
+            assert!(
+                identity.is_none(),
+                "narrow tab bar should preserve tab space"
+            );
         }
     }
 }

@@ -24,6 +24,23 @@ impl App {
                             .layout(egui::Layout::right_to_left(egui::Align::Center)),
                     );
                     let actions = self.session_actions(&mut right, index, Pane::Main);
+                    let session = &self.sessions[index];
+                    let width = (bar.width() - right.min_rect().width() - 320.).clamp(0., 220.);
+                    if !session.local && width >= 96. {
+                        let identity = library::target_label(&session.connection);
+                        right
+                            .add_sized(
+                                [width, 22.],
+                                egui::Label::new(
+                                    RichText::new(&identity)
+                                        .monospace()
+                                        .size(12.)
+                                        .color(colors.muted),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(&identity);
+                    }
                     if right.min_rect().width() > 0. {
                         strip.max.x = right.min_rect().left() - 12.;
                     }

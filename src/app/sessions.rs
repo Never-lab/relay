@@ -201,44 +201,48 @@ impl App {
     ) -> Option<egui::Rect> {
         let colors = theme::palette(ui.ctx());
         // A tab of its own shows its actions in the tab bar. The sides of a pair and detached
-        // windows keep a header, naming each side of a pair to tell them apart.
+        // windows keep the address in their existing header.
         if pane != Pane::Main {
             let mut actions = Actions::default();
             ui.horizontal(|ui| {
                 ui.set_min_height(22.);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     actions = self.session_actions(ui, index, pane);
-                    // The name takes the room the buttons leave, shortened to fit.
-                    if matches!(pane, Pane::Left | Pane::Beside) {
-                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            let s = &self.sessions[index];
-                            let (icon, _) =
-                                ui.allocate_exact_size(Vec2::splat(14.), egui::Sense::hover());
-                            icons::paint_sized(
-                                ui.painter(),
-                                if s.browsing {
-                                    Icon::Folder
-                                } else {
-                                    Icon::protocol(s.connection.protocol)
-                                },
-                                icon.center(),
-                                14.,
-                                match s.connection.protocol {
-                                    Protocol::Rdp | Protocol::Vnc => colors.rdp,
-                                    Protocol::Ssh => colors.accent,
-                                },
-                            );
-                            let title = RichText::new(s.title()).size(12.).color(colors.muted);
-                            ui.add(egui::Label::new(title).truncate())
-                                .on_hover_ui(|ui| {
-                                    ui.label(tabs::details(
-                                        &s.connection,
-                                        tabs::Kind::of(s),
-                                        s.tab_state(),
-                                    ));
-                                });
-                        });
-                    }
+                    // The address takes the room the buttons leave; the tab keeps the name.
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        let s = &self.sessions[index];
+                        let (icon, _) =
+                            ui.allocate_exact_size(Vec2::splat(14.), egui::Sense::hover());
+                        icons::paint_sized(
+                            ui.painter(),
+                            if s.browsing {
+                                Icon::Folder
+                            } else {
+                                Icon::protocol(s.connection.protocol)
+                            },
+                            icon.center(),
+                            14.,
+                            match s.connection.protocol {
+                                Protocol::Rdp | Protocol::Vnc => colors.rdp,
+                                Protocol::Ssh => colors.accent,
+                            },
+                        );
+                        let title = if s.local {
+                            RichText::new(s.title())
+                        } else {
+                            RichText::new(library::target_label(&s.connection)).monospace()
+                        }
+                        .size(12.)
+                        .color(colors.muted);
+                        ui.add(egui::Label::new(title).truncate())
+                            .on_hover_ui(|ui| {
+                                ui.label(tabs::details(
+                                    &s.connection,
+                                    tabs::Kind::of(s),
+                                    s.tab_state(),
+                                ));
+                            });
+                    });
                 });
             });
             ui.add_space(4.);
@@ -248,25 +252,6 @@ impl App {
             }
         }
         let s = &self.sessions[index];
-        if !s.local {
-            let kind = if s.browsing {
-                "SFTP"
-            } else {
-                s.connection.protocol.label()
-            };
-            let identity = format!("{kind} · {}", library::target_label(&s.connection));
-            ui.add(
-                egui::Label::new(
-                    RichText::new(&identity)
-                        .monospace()
-                        .size(12.)
-                        .color(colors.muted),
-                )
-                .truncate(),
-            )
-            .on_hover_text(&identity);
-            ui.add_space(4.);
-        }
         if s.browsing {
             self.files_pane(ui, index);
         } else if s.terminal.is_some() {
