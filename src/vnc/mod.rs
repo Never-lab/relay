@@ -8,7 +8,7 @@ mod decode;
 mod input;
 mod rfb;
 
-use crate::{frame, model::Connection};
+use crate::{frame, model::Connection, secret};
 use connection::{Command, Event, Outcome, Settings, Worker};
 use eframe::egui;
 use rfb::{Credentials, Needs};
@@ -23,7 +23,8 @@ pub const FULL_SCREEN_HELP: &str = "Ctrl+Alt+Enter or the bar at the top edge le
 
 /// How signing in works, for the connection editor.
 pub const SIGN_IN_HELP: &str = "The tab asks for a password, or a Mac's user name and password, \
-    when the server wants one, and keeps it only while the session is open.\nVNC does not \
+    when the server wants one. Tick “Remember on this computer” to keep it in your system \
+    credential store; otherwise it stays only while the session is open.\nVNC does not \
     encrypt the session, so use it on networks you trust or through an SSH tunnel.";
 
 enum Stage {
@@ -33,6 +34,8 @@ enum Stage {
         error: Option<String>,
         /// Whether the prompt still has to put the cursor where typing is needed.
         place_cursor: bool,
+        /// Save the password in the system credential store when connecting.
+        remember: bool,
     },
     Running {
         worker: Worker,
@@ -124,6 +127,8 @@ impl VncClient {
 
     /// Applies what the connection reported since the last frame.
     pub fn poll(&mut self) {
+        let connection_id = self.connection.id;
+        let connection_username = self.connection.username.clone();
         let Stage::Running {
             worker,
             credentials,
@@ -149,16 +154,24 @@ impl VncClient {
                 Event::Ended(Outcome::SignIn(needs, error)) => {
                     let username = match credentials {
                         Some(c) if !c.username.is_empty() => c.username.clone(),
-                        _ => self.connection.username.clone(),
+                        _ => connection_username.clone(),
                     };
+                    let mut credentials = Credentials {
+                        username,
+                        password: String::new(),
+                    };
+                    let mut remember = false;
+                    secret::fill_connection_password(
+                        connection_id,
+                        &mut credentials.password,
+                        &mut remember,
+                    );
                     next = Some(Stage::SignIn {
                         needs,
-                        credentials: Credentials {
-                            username,
-                            password: String::new(),
-                        },
+                        credentials,
                         error,
                         place_cursor: true,
+                        remember,
                     });
                 }
                 Event::Ended(Outcome::Failed(error)) => next = Some(Stage::Ended(error)),
@@ -249,6 +262,7 @@ impl VncClient {
                 credentials,
                 error,
                 place_cursor,
+                remember,
             } => {
                 let place = std::mem::take(place_cursor);
                 let account = *needs == Needs::Account;
@@ -258,6 +272,7 @@ impl VncClient {
                     "Relay keeps the password only while this session is open. VNC uses only \
                      its first eight characters."
                 };
+                let can_remember = self.connection.id != 0;
                 if frame::sign_in(
                     ui,
                     &self.connection.host,
@@ -266,7 +281,13 @@ impl VncClient {
                     error.as_deref(),
                     place,
                     note,
+                    can_remember.then_some(remember),
                 ) {
+                    let _ = secret::persist_connection_password(
+                        self.connection.id,
+                        &credentials.password,
+                        can_remember && *remember,
+                    );
                     start = Some(credentials.clone());
                 }
             }

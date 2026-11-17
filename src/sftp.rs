@@ -11,7 +11,7 @@ mod transfer;
 
 pub use edit::{Edit, EditState};
 
-use crate::{askpass, model::Connection};
+use crate::{askpass, model::Connection, secret};
 use eframe::egui;
 use futures_util::stream::{self, StreamExt};
 use russh_sftp::{
@@ -308,6 +308,10 @@ pub struct Prompt {
     pub answer: String,
     /// Show the answer as it is typed.
     pub reveal: bool,
+    /// Save a login password in the system credential store when answering.
+    pub remember: bool,
+    /// Whether Remember is offered (saved connection + login password prompt).
+    pub can_remember: bool,
     reply: Option<oneshot::Sender<Option<String>>>,
 }
 
@@ -491,6 +495,8 @@ pub struct Browser {
     events_out: Events,
     /// Watches the copies of edited files, once there are any.
     watcher: Option<std_mpsc::Sender<edit::Watch>>,
+    /// Library connection id for remembering login passwords; `0` for ad-hoc.
+    connection_id: u64,
     pub status: Status,
     /// The folder shown; empty until the first listing arrives.
     pub path: String,
@@ -541,6 +547,7 @@ impl Browser {
             },
             Some(ctx),
             start,
+            c.id,
         )
     }
 
@@ -554,6 +561,7 @@ impl Browser {
             },
             None,
             None,
+            0,
         )
     }
 
@@ -567,6 +575,7 @@ impl Browser {
             },
             None,
             None,
+            0,
         )
     }
 
@@ -581,7 +590,7 @@ impl Browser {
             shown: Default::default(),
             progress: Default::default(),
         };
-        let mut browser = Self::with(commands, events, events_out, None);
+        let mut browser = Self::with(commands, events, events_out, None, 0);
         browser.demo_inbox = Some(inbox);
         browser.status = Status::Ready;
         browser.path = path.into();
@@ -637,6 +646,8 @@ impl Browser {
             kind,
             answer: String::new(),
             reveal: false,
+            remember: false,
+            can_remember: false,
             reply: Some(reply),
         });
     }
@@ -646,12 +657,14 @@ impl Browser {
         events: std_mpsc::Receiver<Event>,
         events_out: Events,
         start: Option<String>,
+        connection_id: u64,
     ) -> Self {
         Self {
             commands,
             events,
             events_out,
             watcher: None,
+            connection_id,
             status: Status::Connecting,
             path: String::new(),
             home: String::new(),
@@ -680,7 +693,12 @@ impl Browser {
         }
     }
 
-    fn launch(launch: Launch, ctx: Option<egui::Context>, start: Option<String>) -> Self {
+    fn launch(
+        launch: Launch,
+        ctx: Option<egui::Context>,
+        start: Option<String>,
+        connection_id: u64,
+    ) -> Self {
         let (commands, inbox) = mpsc::unbounded_channel();
         let (sender, events) = std_mpsc::channel();
         let events_out = Events {
@@ -701,7 +719,7 @@ impl Browser {
                     Err(e) => events.send(Event::Ended(format!("Cannot start SFTP: {e}"))),
                 }
             });
-        let mut browser = Self::with(commands, events, events_out, start);
+        let mut browser = Self::with(commands, events, events_out, start, connection_id);
         if let Err(e) = spawned {
             browser.status = Status::Ended(format!("Cannot start SFTP: {e}"));
         }
@@ -732,14 +750,30 @@ impl Browser {
 
     fn apply(&mut self, event: Event) {
         match event {
-            Event::Ask(request) => self.prompts.push(Prompt {
-                id: request.id,
-                text: request.text,
-                kind: request.kind,
-                answer: String::new(),
-                reveal: false,
-                reply: Some(request.reply),
-            }),
+            Event::Ask(request) => {
+                let can_remember = self.connection_id != 0
+                    && request.kind == askpass::Kind::Secret
+                    && askpass::is_login_password_prompt(&request.text);
+                let mut answer = String::new();
+                let mut remember = false;
+                if can_remember {
+                    secret::fill_connection_password(
+                        self.connection_id,
+                        &mut answer,
+                        &mut remember,
+                    );
+                }
+                self.prompts.push(Prompt {
+                    id: request.id,
+                    text: request.text,
+                    kind: request.kind,
+                    answer,
+                    reveal: false,
+                    remember,
+                    can_remember,
+                    reply: Some(request.reply),
+                });
+            }
             Event::Gone(id) => self.prompts.retain(|p| p.id != id),
             Event::Ready { home } => {
                 self.status = Status::Ready;
@@ -1200,6 +1234,15 @@ impl Browser {
     pub fn answer(&mut self, id: u64, answer: Option<String>) {
         if let Some(index) = self.prompts.iter().position(|p| p.id == id) {
             let mut prompt = self.prompts.remove(index);
+            if prompt.can_remember
+                && let Some(password) = answer.as_ref()
+            {
+                let _ = secret::persist_connection_password(
+                    self.connection_id,
+                    password,
+                    prompt.remember,
+                );
+            }
             if let Some(reply) = prompt.reply.take() {
                 let _ = reply.send(answer);
             }

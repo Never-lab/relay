@@ -151,7 +151,8 @@ impl App {
                 Protocol::Rdp => rdp::SIGN_IN_HELP,
                 Protocol::Ssh => {
                     "Uses your OpenSSH client, including your SSH config and agent.\n\
-                     Host verification and password prompts appear in the terminal."
+                     Host verification and password prompts appear in the terminal; the file \
+                     browser can remember a login password in your system credential store."
                 }
                 Protocol::Vnc => vnc::SIGN_IN_HELP,
             };

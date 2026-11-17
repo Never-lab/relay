@@ -1060,6 +1060,9 @@ impl App {
         if !self.persist(next) {
             return false;
         }
+        for &id in ids {
+            let _ = secret::forget_connection_password(id);
+        }
         if last_match {
             self.query.clear();
         }
@@ -1068,6 +1071,18 @@ impl App {
         }
         self.marked.retain(|id| !ids.contains(id));
         true
+    }
+
+    /// Removes a remembered password for `c`: Windows Credential Manager for Windows RDP,
+    /// otherwise Relay's entry in the system credential store.
+    fn forget_saved_password(&self, c: &Connection) -> Result<bool, String> {
+        #[cfg(windows)]
+        if c.protocol == Protocol::Rdp {
+            return rdp::forget_credentials(&c.host);
+        }
+        let had = secret::load_connection_password(c.id).is_some();
+        secret::forget_connection_password(c.id)?;
+        Ok(had)
     }
 
     /// Applies `change` to each saved connection in `ids`, saving them all at once.

@@ -10,6 +10,7 @@ use crate::{
     frame,
     model::{Audio, Connection, Display, Keys, RdpOptions},
     platform::Window,
+    secret,
 };
 use connection::{Command, Event, Outcome, Settings, Untrusted, Worker};
 use eframe::egui::{self, RichText};
@@ -21,8 +22,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Relay never saves RDP passwords here, so there is nothing to forget.
-pub const SAVES_PASSWORDS: bool = false;
+/// Saved connections can keep the password in the system credential store.
+pub const SAVES_PASSWORDS: bool = true;
 
 /// IronRDP cannot ask for a server's administrative session yet.
 pub const ADMIN_SESSIONS: bool = false;
@@ -37,9 +38,10 @@ pub const FULL_SCREEN_HELP: &str = "Ctrl+Alt+Enter or the bar at the top edge le
 pub const CONNECTING_HELP: &str = "Complete any sign-in or certificate prompt in this tab.";
 
 /// How signing in works, for the connection editor.
-pub const SIGN_IN_HELP: &str = "The tab asks for the password each time it connects and keeps it \
-    only while the session is open.\nCertificates your system does not trust are shown for you \
-    to accept.";
+pub const SIGN_IN_HELP: &str = "The tab asks for the password when it connects. Tick “Remember \
+    on this computer” to keep it in your system credential store; otherwise it stays only \
+    while the session is open.\nCertificates your system does not trust are shown for you to \
+    accept.";
 
 /// The options of `options` this backend cannot honor, as the editor lists them.
 pub fn unsupported(options: &RdpOptions) -> Vec<&'static str> {
@@ -65,6 +67,8 @@ pub fn unsupported(options: &RdpOptions) -> Vec<&'static str> {
     missing
 }
 
+/// IronRDP passwords live under `secret::` by connection id; the library menu forgets them
+/// there. This stub keeps the RDP backend API aligned with the Windows ActiveX path.
 pub fn forget_credentials(_host: &str) -> Result<bool, String> {
     Ok(false)
 }
@@ -82,6 +86,8 @@ enum Stage {
         error: Option<String>,
         /// Whether the prompt still has to put the cursor where typing is needed.
         place_cursor: bool,
+        /// Save the password in the system credential store when connecting.
+        remember: bool,
     },
     Trust {
         credentials: Credentials,
@@ -130,16 +136,20 @@ impl RdpClient {
         _admin: bool,
         ctx: egui::Context,
     ) -> Result<Self, String> {
+        let mut credentials = Credentials {
+            username: connection.username.clone(),
+            password: String::new(),
+        };
+        let mut remember = false;
+        secret::fill_connection_password(connection.id, &mut credentials.password, &mut remember);
         Ok(Self {
             connection: connection.clone(),
             ctx,
             stage: Stage::SignIn {
-                credentials: Credentials {
-                    username: connection.username.clone(),
-                    password: String::new(),
-                },
+                credentials,
                 error: None,
                 place_cursor: true,
+                remember,
             },
             area: None,
             requested: None,
@@ -200,6 +210,7 @@ impl RdpClient {
 
     /// Applies what the connection reported since the last frame.
     pub fn poll(&mut self) {
+        let connection_id = self.connection.id;
         let Stage::Running {
             worker,
             credentials,
@@ -228,14 +239,24 @@ impl RdpClient {
                 }
                 Event::Ended(outcome) => {
                     next = Some(match outcome {
-                        Outcome::SignIn(error) => Stage::SignIn {
-                            credentials: Credentials {
+                        Outcome::SignIn(error) => {
+                            let mut credentials = Credentials {
                                 password: String::new(),
                                 ..credentials.clone()
-                            },
-                            error: Some(error),
-                            place_cursor: true,
-                        },
+                            };
+                            let mut remember = false;
+                            secret::fill_connection_password(
+                                connection_id,
+                                &mut credentials.password,
+                                &mut remember,
+                            );
+                            Stage::SignIn {
+                                credentials,
+                                error: Some(error),
+                                place_cursor: true,
+                                remember,
+                            }
+                        }
                         Outcome::Certificate(certificate) => Stage::Trust {
                             credentials: credentials.clone(),
                             certificate,
@@ -341,8 +362,10 @@ impl RdpClient {
                 credentials,
                 error,
                 place_cursor,
+                remember,
             } => {
                 let place = std::mem::take(place_cursor);
+                let can_remember = self.connection.id != 0;
                 if frame::sign_in(
                     ui,
                     &self.connection.host,
@@ -351,7 +374,13 @@ impl RdpClient {
                     error.as_deref(),
                     place,
                     "Relay keeps the password only while this session is open.",
+                    can_remember.then_some(remember),
                 ) {
+                    let _ = secret::persist_connection_password(
+                        self.connection.id,
+                        &credentials.password,
+                        can_remember && *remember,
+                    );
                     start = Some(credentials.clone());
                 }
             }
@@ -744,8 +773,12 @@ mod tests {
         assert!(!client.ended() && !client.reconnecting() && !client.focused());
         assert!(matches!(
             &client.stage,
-            Stage::SignIn { credentials, error: None, place_cursor: true }
-                if credentials.username == "alex" && credentials.password.is_empty()
+            Stage::SignIn {
+                credentials,
+                error: None,
+                place_cursor: true,
+                remember: false,
+            } if credentials.username == "alex" && credentials.password.is_empty()
         ));
     }
 }
