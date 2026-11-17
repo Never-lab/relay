@@ -76,24 +76,28 @@ impl App {
                         let port_width = 96.;
                         let host_width =
                             ui.available_width() - port_width - ui.spacing().item_spacing.x;
-                        labeled(ui, "Host / IP address", |ui| {
+                        labeled(ui, "Host / IP address", |ui, label| {
                             ui.set_width(host_width);
                             ui.add_sized(
                                 [host_width, CONTROL_HEIGHT],
                                 input(&mut c.host, "e.g. 192.168.1.20"),
-                            );
+                            )
+                            .labelled_by(label);
                             validation(ui, &self.editor_error, "host");
                         });
-                        labeled(ui, "Port", |ui| {
+                        labeled(ui, "Port", |ui, label| {
                             ui.set_width(port_width);
                             let mut port = self
                                 .editor_port
                                 .clone()
                                 .unwrap_or_else(|| c.port.to_string());
-                            let response = ui.add_sized(
-                                [port_width, CONTROL_HEIGHT],
-                                input(&mut port, "1–65535").id(egui::Id::new("connection-port")),
-                            );
+                            let response = ui
+                                .add_sized(
+                                    [port_width, CONTROL_HEIGHT],
+                                    input(&mut port, "1–65535")
+                                        .id(egui::Id::new("connection-port")),
+                                )
+                                .labelled_by(label);
                             if response.changed() {
                                 port.retain(|c| c.is_ascii_digit());
                                 c.port = port.parse().unwrap_or(0);
@@ -109,8 +113,10 @@ impl App {
                     };
                     field(ui, "Username (optional)", &mut c.username, user_hint);
                     validation(ui, &self.editor_error, "username");
-                    labeled(ui, "Group", |ui| group_input(ui, &mut c.group, &groups));
-                    labeled(ui, "Notes (optional)", |ui| {
+                    labeled(ui, "Group", |ui, label| {
+                        group_input(ui, label, &mut c.group, &groups)
+                    });
+                    labeled(ui, "Notes (optional)", |ui, label| {
                         let notes = egui::TextEdit::multiline(&mut c.notes)
                             .id(NOTES_ID.into())
                             .hint_text(
@@ -120,7 +126,7 @@ impl App {
                             .margin(egui::Margin::symmetric(10, 6))
                             .desired_rows(2)
                             .desired_width(f32::INFINITY);
-                        notes_focused = ui.add(notes).has_focus();
+                        notes_focused = ui.add(notes).labelled_by(label).has_focus();
                     });
                     ui.add_space(2.);
                     option_checkbox(ui, &mut c.favorite, "Add to favorites");
@@ -277,7 +283,7 @@ pub(super) fn ssh_options(
                 "user@bastion.example.com:22",
             );
             validation(ui, error, "jump");
-            labeled(ui, "Identity file (optional)", |ui| {
+            labeled(ui, "Identity file (optional)", |ui, label| {
                 ui.horizontal(|ui| {
                     let browse = 80.;
                     ui.add_sized(
@@ -289,7 +295,7 @@ pub(super) fn ssh_options(
                             &mut options.identity,
                             "Default: from your SSH config or agent",
                         ),
-                    );
+                    ).labelled_by(label);
                     let button =
                         egui::Button::new("Browse…").min_size(Vec2::new(browse, CONTROL_HEIGHT));
                     if ui.add(button).clicked()
@@ -300,9 +306,10 @@ pub(super) fn ssh_options(
                 });
             });
             validation(ui, error, "identity");
-            labeled(ui, "Port forwards (optional)", |ui| {
+            labeled(ui, "Port forwards (optional)", |ui, label| {
                 let response = ui.add_sized([ui.available_width(), CONTROL_HEIGHT],
                     input(&mut options.forwards, "L8080:localhost:80, R9000:localhost:9000, D1080"))
+                    .labelled_by(label)
                     .on_hover_text("Comma-separated forwards: L8080:localhost:80 (local), R9000:localhost:9000 (remote), D1080 (SOCKS proxy).");
                 *forwards_touched |= response.changed();
                 if (*forwards_touched || validation_field(error) == Some("forwards"))
@@ -368,7 +375,7 @@ pub(super) fn rdp_options(ui: &mut egui::Ui, options: &mut model::RdpOptions, er
             let width = ui.available_width();
             // Drop-downs as tall as the text fields above them.
             ui.spacing_mut().interact_size.y = CONTROL_HEIGHT;
-            labeled(ui, "Remote audio", |ui| {
+            labeled(ui, "Remote audio", |ui, label| {
                 egui::ComboBox::from_id_salt("rdp-audio")
                     .width(width)
                     .selected_text(options.audio.label())
@@ -376,9 +383,11 @@ pub(super) fn rdp_options(ui: &mut egui::Ui, options: &mut model::RdpOptions, er
                         for audio in Audio::ALL {
                             ui.selectable_value(&mut options.audio, audio, audio.label());
                         }
-                    });
+                    })
+                    .response
+                    .labelled_by(label);
             });
-            labeled(ui, "System key combinations", |ui| {
+            labeled(ui, "System key combinations", |ui, label| {
                 egui::ComboBox::from_id_salt("rdp-keys")
                     .width(width)
                     .selected_text(options.keys.label())
@@ -386,9 +395,11 @@ pub(super) fn rdp_options(ui: &mut egui::Ui, options: &mut model::RdpOptions, er
                         for keys in Keys::ALL {
                             ui.selectable_value(&mut options.keys, keys, keys.label());
                         }
-                    });
+                    })
+                    .response
+                    .labelled_by(label);
             });
-            labeled(ui, "Resolution", |ui| {
+            labeled(ui, "Resolution", |ui, label| {
                 ui.horizontal_wrapped(|ui| {
                     ui.radio_value(&mut options.display, Display::Fit, "Fit to tab");
                     let fixed = matches!(options.display, Display::Fixed { .. });
@@ -399,9 +410,11 @@ pub(super) fn rdp_options(ui: &mut egui::Ui, options: &mut model::RdpOptions, er
                         };
                     }
                     if let Display::Fixed { width, height } = &mut options.display {
-                        ui.add(egui::DragValue::new(width).range(200..=8192));
+                        ui.add(egui::DragValue::new(width).range(200..=8192))
+                            .labelled_by(label);
                         ui.label("×");
-                        ui.add(egui::DragValue::new(height).range(200..=8192));
+                        ui.add(egui::DragValue::new(height).range(200..=8192))
+                            .labelled_by(label);
                     }
                 });
             });

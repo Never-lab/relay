@@ -1849,6 +1849,184 @@ fn local_shells_offer_snippets_but_not_files() {
 }
 
 #[test]
+fn navigation_exposes_names_selection_and_keyboard_activation() {
+    for compact in [false, true] {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut id = egui::Id::NULL;
+        let mut activated = false;
+        let mut frame = |events| {
+            ctx.run(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        id = ui.next_auto_id();
+                        activated = if compact {
+                            sidebar::rail_row(ui, Icon::Star, "Favorites (2)", true)
+                        } else {
+                            sidebar::nav_row(ui, Icon::Star, "Favorites", 2, true)
+                        };
+                    });
+                },
+            )
+        };
+        let output = frame(vec![]);
+        let update = output.platform_output.accesskit_update.unwrap();
+        let label = if compact {
+            "Favorites (2)"
+        } else {
+            "Favorites"
+        };
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.label() == Some(label))
+            .unwrap();
+        assert_eq!(node.toggled(), Some(egui::accesskit::Toggled::True));
+        drop(frame);
+        ctx.memory_mut(|m| m.request_focus(id));
+        let _ = ctx.run(
+            egui::RawInput {
+                events: vec![press(egui::Key::Enter)],
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    activated = if compact {
+                        sidebar::rail_row(ui, Icon::Star, "Favorites (2)", true)
+                    } else {
+                        sidebar::nav_row(ui, Icon::Star, "Favorites", 2, true)
+                    };
+                });
+            },
+        );
+        assert!(activated, "navigation did not activate with Enter");
+    }
+}
+
+#[test]
+fn connection_and_file_rows_expose_identity_and_multiple_selection() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut app = test_app(&ctx);
+    app.marked = [1, 3].into_iter().collect();
+    let output = ctx.run(egui::RawInput::default(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| app.workspace(ui));
+    });
+    let update = output.platform_output.accesskit_update.unwrap();
+    for (name, selected) in [("Alpha", true), ("Bravo", false), ("Charlie", true)] {
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| {
+                n.label()
+                    .is_some_and(|label| label.starts_with(&format!("{name}, ")))
+            })
+            .unwrap();
+        assert!(node.label().unwrap().contains(".example"));
+        assert_eq!(
+            node.toggled(),
+            Some(if selected {
+                egui::accesskit::Toggled::True
+            } else {
+                egui::accesskit::Toggled::False
+            })
+        );
+    }
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut app = files_app(&ctx);
+    let browser = app.sessions[0].files.as_mut().unwrap();
+    browser.view.selected = ["app".into(), "c.txt".into()].into_iter().collect();
+    let output = ctx.run(Default::default(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| app.files_pane(ui, 0));
+    });
+    let update = output.platform_output.accesskit_update.unwrap();
+    for (label, selected) in [
+        ("app, Folder", true),
+        ("b.txt, File", false),
+        ("c.txt, File", true),
+    ] {
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.label() == Some(label))
+            .unwrap();
+        assert_eq!(
+            node.toggled(),
+            Some(if selected {
+                egui::accesskit::Toggled::True
+            } else {
+                egui::accesskit::Toggled::False
+            })
+        );
+    }
+}
+
+#[test]
+fn connection_editor_inputs_are_associated_with_their_labels() {
+    for protocol in Protocol::ALL {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = test_app(&ctx);
+        let mut c = app.connections[0].clone();
+        c.protocol = protocol;
+        c.ssh.jump = "bastion.example".into();
+        c.rdp.gateway = "gateway.example".into();
+        app.edit(c);
+        for _ in 0..2 {
+            let _ = connection_editor_frame(&mut app, &ctx, Vec2::new(1200., 1600.), vec![]);
+        }
+        let output = connection_editor_frame(&mut app, &ctx, Vec2::new(1200., 1600.), vec![]);
+        let update = output.platform_output.accesskit_update.unwrap();
+        let mut labels = vec![
+            "Connection name",
+            "Host / IP address",
+            "Port",
+            "Username (optional)",
+            "Group",
+            "Notes (optional)",
+        ];
+        match protocol {
+            Protocol::Rdp => labels.extend([
+                "RD Gateway (optional)",
+                "Remote audio",
+                "System key combinations",
+            ]),
+            Protocol::Ssh => labels.extend([
+                "Jump host (optional)",
+                "Identity file (optional)",
+                "Port forwards (optional)",
+            ]),
+            Protocol::Vnc => {}
+        }
+        for label in labels {
+            let (label_id, _) = update
+                .nodes
+                .iter()
+                .find(|(_, n)| n.role() == egui::accesskit::Role::Label && n.value() == Some(label))
+                .unwrap_or_else(|| panic!("missing label {label}"));
+            assert!(
+                update
+                    .nodes
+                    .iter()
+                    .any(|(_, n)| n.labelled_by().contains(label_id)),
+                "unassociated label {label} for {protocol:?}"
+            );
+        }
+        let (_, choose) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.label() == Some("Choose an existing group"))
+            .unwrap();
+        assert_eq!(choose.role(), egui::accesskit::Role::Button);
+    }
+}
+
+#[test]
 fn changes_that_repeat_an_id_are_not_saved() {
     let ctx = egui::Context::default();
     let mut app = test_app(&ctx);

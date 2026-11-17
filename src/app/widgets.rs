@@ -114,6 +114,7 @@ pub(super) const BAR_HEIGHT: f32 = 40.;
 /// A group name to type, with a button listing the existing `groups` to choose from.
 pub(super) fn group_input(
     ui: &mut egui::Ui,
+    label: egui::Id,
     group: &mut String,
     groups: &std::collections::BTreeSet<String>,
 ) {
@@ -126,13 +127,21 @@ pub(super) fn group_input(
                 CONTROL_HEIGHT,
             ],
             input(group, "Personal"),
-        );
+        )
+        .labelled_by(label);
         let choose = ui
             .add_enabled(
                 !groups.is_empty(),
                 egui::Button::new("").min_size(Vec2::splat(button)),
             )
             .on_hover_text("Choose an existing group");
+        choose.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Button,
+                choose.enabled(),
+                "Choose an existing group",
+            )
+        });
         icons::paint_sized(
             ui.painter(),
             Icon::ChevronDown,
@@ -227,23 +236,24 @@ pub(super) fn input<'a>(value: &'a mut String, hint: &str) -> egui::TextEdit<'a>
 pub(super) fn labeled<R>(
     ui: &mut egui::Ui,
     label: &str,
-    add: impl FnOnce(&mut egui::Ui) -> R,
+    add: impl FnOnce(&mut egui::Ui, egui::Id) -> R,
 ) -> R {
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 4.;
-        ui.label(
+        let label = ui.label(
             RichText::new(label)
                 .size(12.)
                 .color(theme::palette(ui.ctx()).muted),
         );
-        add(ui)
+        add(ui, label.id)
     })
     .inner
 }
 
 pub(super) fn field(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str) {
-    labeled(ui, label, |ui| {
-        ui.add_sized([ui.available_width(), CONTROL_HEIGHT], input(value, hint));
+    labeled(ui, label, |ui, label| {
+        ui.add_sized([ui.available_width(), CONTROL_HEIGHT], input(value, hint))
+            .labelled_by(label);
     });
 }
 

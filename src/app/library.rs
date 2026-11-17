@@ -743,6 +743,14 @@ impl App {
         } else {
             self.marked.contains(&c.id)
         };
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(
+                egui::WidgetType::SelectableLabel,
+                ui.is_enabled(),
+                selected,
+                format!("{}, {}, {}", c.name, c.protocol.label(), target_label(c)),
+            )
+        });
         let modifiers = ui.input(|i| i.modifiers);
         // The star, name and buttons take the hover from the row itself, so use the pointer.
         let hovered = ui.rect_contains_pointer(rect);
@@ -754,6 +762,14 @@ impl App {
             };
             let band = rect.shrink2(Vec2::new(0., 2.));
             ui.painter().rect_filled(band, RADIUS, fill);
+        }
+        if response.has_focus() {
+            ui.painter().rect_stroke(
+                rect.shrink2(Vec2::new(0., 2.)),
+                RADIUS,
+                Stroke::new(1_f32, colors.accent),
+                egui::StrokeKind::Inside,
+            );
         }
         if response.clicked() {
             self.click_row(c.id, modifiers, shown);

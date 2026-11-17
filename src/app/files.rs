@@ -1013,6 +1013,14 @@ fn row(
     );
     let name = &entry.name;
     let selected = files.view.selected.contains(name);
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::SelectableLabel,
+            ui.is_enabled(),
+            selected,
+            format!("{}, {}", name, if entry.dir { "Folder" } else { "File" }),
+        )
+    });
     let cursor = files.view.cursor.as_ref() == Some(name);
     let hovered = ui.rect_contains_pointer(rect);
     let dropping = entry.dir
@@ -1036,11 +1044,11 @@ fn row(
         };
         ui.painter().rect_filled(band, RADIUS, fill);
     }
-    if cursor && files.view.focused && !selected {
+    if response.has_focus() || (cursor && files.view.focused && !selected) {
         ui.painter().rect_stroke(
             band,
             RADIUS,
-            Stroke::new(1_f32, colors.line),
+            Stroke::new(1_f32, colors.accent),
             egui::StrokeKind::Inside,
         );
     }

@@ -23,6 +23,25 @@ impl App {
                     Vec2::new(ui.available_width(), BAR_HEIGHT),
                     Sense::click(),
                 );
+                toggle.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        ui.is_enabled(),
+                        if collapsed {
+                            "Expand sidebar"
+                        } else {
+                            "Collapse sidebar"
+                        },
+                    )
+                });
+                if toggle.has_focus() {
+                    ui.painter().rect_stroke(
+                        header.shrink(2.),
+                        RADIUS,
+                        Stroke::new(1_f32, colors.accent),
+                        egui::StrokeKind::Inside,
+                    );
+                }
                 let edge = ui.max_rect().x_range().expand(margin as f32);
                 ui.painter()
                     .hline(edge, header.bottom(), Stroke::new(1_f32, colors.line));
@@ -166,6 +185,21 @@ impl App {
                         ui.id().with("library"),
                         if idle { Sense::click() } else { Sense::hover() },
                     );
+                    library.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            idle,
+                            format!("Manage {} library", self.location.label()),
+                        )
+                    });
+                    if library.has_focus() {
+                        ui.painter().rect_stroke(
+                            library_rect,
+                            RADIUS,
+                            Stroke::new(1_f32, colors.accent),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
                     if library.hovered() && idle {
                         ui.painter().rect_filled(library_rect, RADIUS, colors.hover);
                     }
@@ -223,6 +257,14 @@ pub(super) fn nav_row(
     let colors = theme::palette(ui.ctx());
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.), Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::SelectableLabel,
+            ui.is_enabled(),
+            selected,
+            label,
+        )
+    });
     if selected || response.hovered() {
         ui.painter().rect_filled(
             rect,
@@ -232,6 +274,14 @@ pub(super) fn nav_row(
             } else {
                 colors.hover
             },
+        );
+    }
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            rect,
+            RADIUS,
+            Stroke::new(1_f32, colors.accent),
+            egui::StrokeKind::Inside,
         );
     }
     let (icon_color, color) = if selected {
@@ -280,6 +330,14 @@ pub(super) fn rail_row(ui: &mut egui::Ui, icon: Icon, tooltip: &str, selected: b
     let colors = theme::palette(ui.ctx());
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.), Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::SelectableLabel,
+            ui.is_enabled(),
+            selected,
+            tooltip,
+        )
+    });
     if selected || response.hovered() {
         let fill = if selected {
             colors.selected
@@ -287,6 +345,14 @@ pub(super) fn rail_row(ui: &mut egui::Ui, icon: Icon, tooltip: &str, selected: b
             colors.hover
         };
         ui.painter().rect_filled(rect, RADIUS, fill);
+    }
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            rect,
+            RADIUS,
+            Stroke::new(1_f32, colors.accent),
+            egui::StrokeKind::Inside,
+        );
     }
     let color = if selected {
         colors.accent

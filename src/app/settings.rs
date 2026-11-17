@@ -487,7 +487,7 @@ impl App {
         let colors = theme::palette(ui.ctx());
         if let Some((index, draft)) = &mut self.snippet_draft {
             field(ui, "Name", &mut draft.name, "e.g. Tail syslog");
-            labeled(ui, "Command", |ui| {
+            labeled(ui, "Command", |ui, label| {
                 ui.add(
                     egui::TextEdit::multiline(&mut draft.command)
                         .font(egui::TextStyle::Monospace)
@@ -495,7 +495,8 @@ impl App {
                         .desired_width(f32::INFINITY)
                         .margin(Margin::symmetric(11, 8))
                         .hint_text(RichText::new("tail -f /var/log/syslog").weak()),
-                );
+                )
+                .labelled_by(label);
             });
             ui.checkbox(
                 &mut draft.run,

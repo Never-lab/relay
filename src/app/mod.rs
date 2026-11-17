@@ -1294,7 +1294,9 @@ impl App {
                 dialog("move-to-group", ctx).show(ctx, |ui| {
                     ui.set_width(380.);
                     ui.heading(format!("Move {} connections to a group", ids.len()));
-                    labeled(ui, "Group", |ui| group_input(ui, group, &groups));
+                    labeled(ui, "Group", |ui, label| {
+                        group_input(ui, label, group, &groups)
+                    });
                     let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
                     let named = !group.trim().is_empty();
                     let (moved, cancelled) = confirm_buttons(ui, "Move", "Cancel", false, named);
