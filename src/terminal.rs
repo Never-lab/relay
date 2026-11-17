@@ -634,6 +634,28 @@ impl Terminal {
             }
         }
 
+        let (cursor_row, cursor_col) = screen.cursor_position();
+        let cursor_visible = !screen.hide_cursor() && scrolled == 0 && !self.ended;
+        let mode = Mode {
+            application_cursor: screen.application_cursor(),
+            bracketed_paste: screen.bracketed_paste(),
+        };
+        let selection_text = selection
+            .map(|(start, end)| screen.contents_between(start.0, start.1, end.0, end.1 + 1));
+        let screen_contents = if response.has_focus() && !self.ended {
+            Some(screen.contents())
+        } else {
+            None
+        };
+        // Copy the visible grid, then release the parser so output can process during paint.
+        let mut cells = Vec::with_capacity(rows as usize * cols as usize);
+        for row in 0..rows {
+            for col in 0..cols {
+                cells.push(screen.cell(row, col).cloned());
+            }
+        }
+        drop(parser);
+
         // Title bar: state and size on the left, scroll position or hints on the right.
         let text_y = bar.center().y;
         let (state, dot) = if self.ended {
@@ -706,15 +728,18 @@ impl Terminal {
                 );
             }
         };
-        let (cursor_row, cursor_col) = screen.cursor_position();
-        let cursor_visible = !screen.hide_cursor() && scrolled == 0 && !self.ended;
         let focused = response.has_focus();
+        let cell_at_grid = |row: u16, col: u16| -> Option<&vt100::Cell> {
+            cells
+                .get(row as usize * cols as usize + col as usize)
+                .and_then(|c| c.as_ref())
+        };
         for row in 0..rows {
             let mut run = String::new();
             let mut run_start = 0;
             let mut run_style = None;
             for col in 0..cols {
-                let Some(c) = screen.cell(row, col) else {
+                let Some(c) = cell_at_grid(row, col) else {
                     continue;
                 };
                 if c.is_wide_continuation() {
@@ -828,8 +853,6 @@ impl Terminal {
             }
         }
 
-        let selection_text = selection
-            .map(|(start, end)| screen.contents_between(start.0, start.1, end.0, end.1 + 1));
         if response.secondary_clicked() && !reporting {
             response.request_focus();
             match &selection_text {
@@ -844,20 +867,25 @@ impl Terminal {
         }
         if response.has_focus() && !self.ended {
             let (events, modifiers) = ui.input(|i| (i.events.clone(), i.modifiers));
-            let mode = Mode {
-                application_cursor: screen.application_cursor(),
-                bracketed_paste: screen.bracketed_paste(),
-            };
             let (keys, copy) = translate(&events, modifiers, mode);
             input.extend(keys);
             if copy {
-                ui.ctx()
-                    .copy_text(selection_text.unwrap_or_else(|| screen.contents()));
+                ui.ctx().copy_text(
+                    selection_text
+                        .clone()
+                        .or(screen_contents)
+                        .unwrap_or_default(),
+                );
             }
         }
         if !input.is_empty() {
-            parser.screen_mut().set_scrollback(0);
-            drop(parser);
+            // Typing returns to the live screen; brief re-lock after paint.
+            self.process
+                .parser
+                .lock()
+                .unwrap()
+                .screen_mut()
+                .set_scrollback(0);
             self.selection = None;
             #[cfg(test)]
             self.sent.extend(&input);
