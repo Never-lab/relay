@@ -818,14 +818,23 @@ impl App {
                             egui::WidgetType::Checkbox,
                             true,
                             c.favorite,
-                            "Favorite",
+                            format!("Favorite {}", c.name),
                         )
                     });
-                    let (icon, color) = match (c.favorite, response.hovered()) {
-                        (true, _) => (Icon::StarFilled, colors.accent),
-                        (false, true) => (Icon::Star, colors.text),
-                        (false, false) => (Icon::Star, colors.muted.gamma_multiply(0.7)),
-                    };
+                    if response.has_focus() {
+                        ui.painter().rect_stroke(
+                            star,
+                            RADIUS_SMALL,
+                            Stroke::new(1_f32, colors.accent),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                    let (icon, color) =
+                        match (c.favorite, response.hovered() || response.has_focus()) {
+                            (true, _) => (Icon::StarFilled, colors.accent),
+                            (false, true) => (Icon::Star, colors.text),
+                            (false, false) => (Icon::Star, colors.muted.gamma_multiply(0.7)),
+                        };
                     icons::paint_sized(ui.painter(), icon, star.center(), ICON_SIZE, color);
                     if response
                         .on_hover_cursor(egui::CursorIcon::PointingHand)

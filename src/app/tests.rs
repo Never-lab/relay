@@ -1537,6 +1537,107 @@ fn files_frame(app: &mut App, ctx: &egui::Context, events: Vec<egui::Event>) {
     );
 }
 
+#[test]
+fn transfer_header_keeps_summary_clear_of_actions_in_compact_panes() {
+    for theme in theme::Theme::ALL {
+        for width in [300., 360., 640.] {
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            theme.apply(&ctx);
+            apply_style(&ctx);
+            let mut app = files_app(&ctx);
+            let browser = app.sessions[0].files.as_mut().unwrap();
+            browser.demo_transfer("archive.tar.gz", crate::sftp::Direction::Download, 10, 100);
+            browser.demo_transfer("done.txt", crate::sftp::Direction::Upload, 100, 100);
+            for _ in 0..2 {
+                let _ =
+                    session_pane_frame(&mut app, &ctx, Pane::Main, Vec2::new(width, 600.), vec![]);
+            }
+            let output =
+                session_pane_frame(&mut app, &ctx, Pane::Main, Vec2::new(width, 600.), vec![]);
+            let update = output.platform_output.accesskit_update.unwrap();
+            let button = |label| {
+                update
+                    .nodes
+                    .iter()
+                    .find(|(_, n)| n.label() == Some(label))
+                    .unwrap()
+                    .1
+                    .bounds()
+                    .unwrap()
+            };
+            let cancel = button("Cancel all");
+            let clear = button("Clear finished");
+            assert!(cancel.x0 >= 0. && cancel.x1 <= clear.x0 && clear.x1 <= f64::from(width));
+            assert_eq!(cancel.y0, clear.y0, "transfer actions added another row");
+            for text in ["TRANSFERS", "1 in progress"] {
+                let (_, node) = update
+                    .nodes
+                    .iter()
+                    .find(|(_, n)| {
+                        n.role() == egui::accesskit::Role::Label && n.value() == Some(text)
+                    })
+                    .unwrap();
+                let bounds = node.bounds().unwrap();
+                assert!(
+                    bounds.x0 >= 0. && bounds.x1 <= cancel.x0,
+                    "{theme:?}, {width}: {text} overlapped transfer actions"
+                );
+                assert!(
+                    (bounds.y0 - cancel.y0).abs() < 16.,
+                    "transfer title added another row"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn favorite_controls_name_the_machine_and_show_keyboard_focus() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    apply_style(&ctx);
+    let mut app = test_app(&ctx);
+    for step in 0..24 {
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(1200., 800.),
+                )),
+                events: if step == 0 {
+                    vec![]
+                } else {
+                    vec![press(egui::Key::Tab)]
+                },
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.workspace(ui));
+            },
+        );
+        let update = output.platform_output.accesskit_update.unwrap();
+        for name in ["Alpha", "Bravo", "Charlie"] {
+            assert!(
+                update
+                    .nodes
+                    .iter()
+                    .any(|(_, n)| n.label() == Some(&format!("Favorite {name}")))
+            );
+        }
+        let (id, _) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.label() == Some("Favorite Alpha"))
+            .unwrap();
+        if update.focus == *id {
+            assert!(output.shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.rect.size() == Vec2::splat(24.) && r.stroke.color == theme::palette(&ctx).accent && r.stroke.width > 0.)));
+            return;
+        }
+    }
+    panic!("favorite was unreachable by Tab");
+}
+
 fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
     egui::Event::Key {
         key,

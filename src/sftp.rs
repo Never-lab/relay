@@ -591,7 +591,7 @@ impl Browser {
     }
 
     /// Adds a transfer as if it were under way, for rendering checks.
-    #[cfg(feature = "ui-check")]
+    #[cfg(any(test, feature = "ui-check"))]
     pub fn demo_transfer(&mut self, name: &str, direction: Direction, done: u64, total: u64) {
         let (job, destination) = match direction {
             Direction::Download => (

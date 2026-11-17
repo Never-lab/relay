@@ -1831,7 +1831,6 @@ fn transfers(ui: &mut egui::Ui, files: &mut Browser, max_height: f32) {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.set_min_height(28.);
-                ui.label(caption("TRANSFERS").color(colors.muted));
                 let mut summary = vec![];
                 if active > 0 {
                     summary.push(format!("{active} in progress"));
@@ -1839,11 +1838,6 @@ fn transfers(ui: &mut egui::Ui, files: &mut Browser, max_height: f32) {
                 if failed > 0 {
                     summary.push(format!("{failed} need attention"));
                 }
-                ui.label(
-                    RichText::new(summary.join(" · "))
-                        .size(12.)
-                        .color(colors.muted),
-                );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if active < files.transfers.len() && ui.small_button("Clear finished").clicked()
                     {
@@ -1852,6 +1846,18 @@ fn transfers(ui: &mut egui::Ui, files: &mut Browser, max_height: f32) {
                     if active > 0 && ui.small_button("Cancel all").clicked() {
                         files.cancel_all();
                     }
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        let summary = summary.join(" · ");
+                        ui.add(
+                            egui::Label::new(caption("TRANSFERS").color(colors.muted)).truncate(),
+                        )
+                        .on_hover_text(&summary);
+                        ui.add(
+                            egui::Label::new(RichText::new(&summary).size(12.).color(colors.muted))
+                                .truncate(),
+                        )
+                        .on_hover_text(&summary);
+                    });
                 });
             });
             // Only the rows in view are laid out, however long the history.
