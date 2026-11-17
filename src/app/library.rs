@@ -170,10 +170,77 @@ impl App {
 
     pub(super) fn workspace(&mut self, ui: &mut egui::Ui) {
         let colors = theme::palette(ui.ctx());
-        let order = self.filtered();
         let total = self.connections.len();
         let search_id = egui::Id::new("library-search");
         let focused = ui.memory(|m| m.focused());
+        // One toolbar: the view's title and count, search, then actions.
+        let mut search = None;
+        let mut order = None;
+        ui.horizontal(|ui| {
+            ui.set_min_height(CONTROL_HEIGHT);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                // An empty library offers the same action in its welcome.
+                if total > 0
+                    && accent_button(ui, "New connection", 0.)
+                        .on_hover_text("Ctrl+N")
+                        .clicked()
+                {
+                    self.new_connection();
+                }
+                let personal = matches!(self.location, database::Location::Local(_));
+                let hint = if personal {
+                    "Load the library as last saved, as by another Relay window. \
+                     Your unsaved changes can still be exported."
+                } else {
+                    "Load the latest team changes"
+                };
+                if self.offers_refresh()
+                    && outline_button(ui, "Refresh", 0.)
+                        .on_hover_text(hint)
+                        .clicked()
+                {
+                    self.refresh();
+                }
+                let width = (ui.available_width() - 180.).clamp(160., 320.);
+                search = Some(
+                    search_field(
+                        ui,
+                        &mut self.query,
+                        "Search or type a host",
+                        "Ctrl+K",
+                        search_id,
+                        width,
+                    )
+                    .on_hover_text(
+                        "Arrow keys select · Enter connects · Esc clears\n\
+                         Alt+Enter connects to a typed host without saving it",
+                    ),
+                );
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    let title = self.group.as_deref().unwrap_or(match self.filter {
+                        Filter::All => "All connections",
+                        Filter::Recent => "Recent",
+                        Filter::Favorites => "Favorites",
+                        Filter::Rdp => "RDP desktops",
+                        Filter::Ssh => "SSH terminals",
+                        Filter::Vnc => "VNC desktops",
+                    });
+                    let shown = self.filtered();
+                    let open = self.sessions.iter().filter(|s| s.is_running()).count();
+                    let mut summary = if shown.len() == total {
+                        total.to_string()
+                    } else {
+                        format!("{} of {total}", shown.len())
+                    };
+                    order = Some(shown);
+                    if open > 0 {
+                        summary.push_str(&format!(" · {open} open"));
+                    }
+                    title_line(ui, title, &summary);
+                });
+            });
+        });
+        let order = order.unwrap();
         // Connections chosen together stay chosen while they are shown, so actions on them
         // never reach rows a search or filter hid. Only shown rows can be chosen, so this is
         // needed only when what is shown changes.
@@ -233,70 +300,6 @@ impl App {
         let enter_idle = focused.is_none()
             && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
 
-        // One toolbar: the view's title and count, search, then actions.
-        let mut search = None;
-        ui.horizontal(|ui| {
-            ui.set_min_height(CONTROL_HEIGHT);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                // An empty library offers the same action in its welcome.
-                if total > 0
-                    && accent_button(ui, "New connection", 0.)
-                        .on_hover_text("Ctrl+N")
-                        .clicked()
-                {
-                    self.new_connection();
-                }
-                let personal = matches!(self.location, database::Location::Local(_));
-                let hint = if personal {
-                    "Load the library as last saved, as by another Relay window. \
-                     Your unsaved changes can still be exported."
-                } else {
-                    "Load the latest team changes"
-                };
-                if self.offers_refresh()
-                    && outline_button(ui, "Refresh", 0.)
-                        .on_hover_text(hint)
-                        .clicked()
-                {
-                    self.refresh();
-                }
-                let width = (ui.available_width() - 180.).clamp(160., 320.);
-                search = Some(
-                    search_field(
-                        ui,
-                        &mut self.query,
-                        "Search or type a host",
-                        "Ctrl+K",
-                        search_id,
-                        width,
-                    )
-                    .on_hover_text(
-                        "Arrow keys select · Enter connects · Esc clears\n\
-                         Alt+Enter connects to a typed host without saving it",
-                    ),
-                );
-                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    let title = self.group.as_deref().unwrap_or(match self.filter {
-                        Filter::All => "All connections",
-                        Filter::Recent => "Recent",
-                        Filter::Favorites => "Favorites",
-                        Filter::Rdp => "RDP desktops",
-                        Filter::Ssh => "SSH terminals",
-                        Filter::Vnc => "VNC desktops",
-                    });
-                    let open = self.sessions.iter().filter(|s| s.is_running()).count();
-                    let mut summary = if order.len() == total {
-                        total.to_string()
-                    } else {
-                        format!("{} of {total}", order.len())
-                    };
-                    if open > 0 {
-                        summary.push_str(&format!(" · {open} open"));
-                    }
-                    title_line(ui, title, &summary);
-                });
-            });
-        });
         let search = search.unwrap();
         if self.search_focus {
             search.request_focus();
@@ -604,11 +607,11 @@ impl App {
             .inner_margin(Margin::symmetric(8, 2))
             .show(ui, |ui| {
                 let width = ui.available_width();
-                let columns = table_columns(width);
+                let columns = table_columns(width, self.state.library_columns);
                 ui.spacing_mut().item_spacing.y = 0.;
                 let (header, _) = ui.allocate_exact_size(Vec2::new(width, 32.), Sense::hover());
                 let mut x = header.min.x;
-                for (column, w) in &columns {
+                for (index, (column, w)) in columns.iter().enumerate() {
                     let galley = egui::WidgetText::from(caption(column.title())).into_galley(
                         ui,
                         Some(egui::TextWrapMode::Truncate),
@@ -620,7 +623,61 @@ impl App {
                         galley,
                         colors.muted,
                     );
+                    ui.interact(
+                        Rect::from_min_size(
+                            egui::pos2(x, header.top()),
+                            Vec2::new(*w, header.height()),
+                        ),
+                        ui.id().with(("column-title", index)),
+                        Sense::hover(),
+                    )
+                    .on_hover_text(column.title());
                     x += w + GAP;
+                    if let Some(slot) = column.slot().filter(|&slot| {
+                        slot < 3 && (slot != 2 || columns.iter().any(|c| c.0 == Column::Group))
+                    }) {
+                        let handle = Rect::from_center_size(
+                            egui::pos2(x - GAP / 2., header.center().y),
+                            Vec2::new(8., header.height()),
+                        );
+                        let response = ui
+                            .interact(
+                                handle,
+                                ui.id().with(("column", slot)),
+                                Sense::click_and_drag(),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+                            .on_hover_text("Drag to resize · Double-click to reset");
+                        ui.painter().vline(
+                            handle.center().x,
+                            header.y_range().shrink(8.),
+                            Stroke::new(
+                                1_f32,
+                                if response.hovered() || response.dragged() {
+                                    colors.muted
+                                } else {
+                                    colors.line
+                                },
+                            ),
+                        );
+                        if response.dragged() {
+                            let delta = ui.input(|i| i.pointer.delta().x);
+                            self.state.library_columns = Some(resize_column(
+                                &columns,
+                                slot,
+                                delta,
+                                self.state.library_columns,
+                            ));
+                        }
+                        if response.double_clicked() {
+                            self.state.library_columns =
+                                Some(reset_column(&columns, slot, self.state.library_columns));
+                            self.ctx.request_repaint();
+                        }
+                        if response.drag_stopped() || response.double_clicked() {
+                            self.save_state();
+                        }
+                    }
                 }
                 ui.painter().line_segment(
                     [header.left_bottom(), header.right_bottom()],
@@ -767,7 +824,7 @@ impl App {
                     }
                 }
                 Column::Name => {
-                    let name_font = FontId::proportional(13.);
+                    let name_font = FontId::proportional(14.);
                     let sub_font = FontId::proportional(11.);
                     if description.is_some() {
                         center_block(ui, &[&name_font, &sub_font]);
@@ -808,23 +865,32 @@ impl App {
                 Column::Host => {
                     let host_font = FontId::monospace(12.);
                     let sub_font = FontId::proportional(11.);
-                    center_block(ui, &[&host_font, &sub_font]);
+                    if c.username.is_empty() {
+                        center_block(ui, &[&host_font]);
+                    } else {
+                        center_block(ui, &[&host_font, &sub_font]);
+                    }
                     // The address sits between the name and the muted user in weight.
                     ui.add(
                         egui::Label::new(
                             RichText::new(c.address())
                                 .font(host_font)
-                                .color(colors.text.lerp_to_gamma(colors.muted, 0.35)),
+                                .color(colors.text),
                         )
                         .truncate(),
                     )
                     .on_hover_text(c.address());
-                    let user = if c.username.is_empty() {
-                        RichText::new("Ask on connect").italics()
-                    } else {
-                        RichText::new(&c.username)
-                    };
-                    ui.add(egui::Label::new(user.font(sub_font).color(colors.muted)).truncate());
+                    if !c.username.is_empty() {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(&c.username)
+                                    .font(sub_font)
+                                    .color(colors.muted),
+                            )
+                            .truncate(),
+                        )
+                        .on_hover_text(&c.username);
+                    }
                 }
                 Column::Group => {
                     ui.add(
@@ -841,7 +907,7 @@ impl App {
                     // Connect appears where the pointer or keyboard is; double-click and
                     // Enter connect any row.
                     // Rows chosen together connect from the bar above the table.
-                    if (selected && self.marked.is_empty()) || hovered {
+                    if *w >= 128. && ((selected && self.marked.is_empty()) || hovered) {
                         let connect = egui::Button::new(RichText::new("Connect").size(12.))
                             .fill(colors.surface)
                             .stroke(Stroke::new(1_f32, colors.line))
@@ -1015,6 +1081,20 @@ pub(super) enum Column {
 }
 
 impl Column {
+    fn slot(self) -> Option<usize> {
+        match self {
+            Self::Name => Some(0),
+            Self::Protocol => Some(1),
+            Self::Host => Some(2),
+            Self::Group => Some(3),
+            _ => None,
+        }
+    }
+
+    fn flexible(self) -> bool {
+        matches!(self, Self::Name | Self::Host | Self::Group)
+    }
+
     fn title(self) -> &'static str {
         match self {
             Self::Name => "NAME",
@@ -1026,26 +1106,125 @@ impl Column {
     }
 }
 
-/// Table columns with their widths; narrow tables drop the group, then the protocol column.
-pub(super) fn table_columns(width: f32) -> Vec<(Column, f32)> {
-    // Widths above 1 are fixed pixels; the rest are shares of the flexible space.
-    let mut columns = vec![(Column::Star, 28.), (Column::Name, 0.41)];
+/// Narrow tables drop group and protocol; saved preferences survive these temporary changes.
+pub(super) fn table_columns(width: f32, saved: Option<[f32; 4]>) -> Vec<(Column, f32)> {
+    let preferred = column_preferences(saved);
+    let mut columns = vec![(Column::Star, 28.), (Column::Name, preferred[0])];
     if width >= 560. {
-        columns.push((Column::Protocol, 64.));
+        columns.push((Column::Protocol, preferred[1]));
     }
-    columns.push((Column::Host, 0.35));
+    columns.push((Column::Host, preferred[2]));
     if width >= 720. {
-        columns.push((Column::Group, 0.24));
+        columns.push((Column::Group, preferred[3]));
     }
-    // More, Connect, and for SSH the file browser button.
-    columns.push((Column::Actions, 128. + ACTION_INSET));
-    let fixed: f32 = columns.iter().filter(|c| c.1 > 1.).map(|c| c.1).sum();
-    let weights: f32 = columns.iter().filter(|c| c.1 <= 1.).map(|c| c.1).sum();
-    let flexible = (width - fixed - GAP * (columns.len() - 1) as f32).max(120.);
+    columns.push((
+        Column::Actions,
+        if width >= 560. {
+            128. + ACTION_INSET
+        } else {
+            36.
+        },
+    ));
+    let fixed: f32 = columns
+        .iter()
+        .filter(|(c, _)| !c.flexible())
+        .map(|c| c.1)
+        .sum();
+    let flexible = (width - fixed - GAP * (columns.len() - 1) as f32).max(0.);
+    let count = columns.iter().filter(|(c, _)| c.flexible()).count() as f32;
+    let minimum = (flexible / count).min(48.);
+    let weights: f32 = columns
+        .iter()
+        .filter(|(c, _)| c.flexible())
+        .map(|c| c.1)
+        .sum();
+    for (column, w) in &mut columns {
+        if column.flexible() {
+            *w = minimum + (flexible - minimum * count) * *w / weights;
+        }
+    }
     columns
-        .into_iter()
-        .map(|(column, w)| (column, if w > 1. { w } else { flexible * w / weights }))
-        .collect()
+}
+
+fn column_preferences(saved: Option<[f32; 4]>) -> [f32; 4] {
+    saved
+        .filter(|values| {
+            values
+                .iter()
+                .all(|v| v.is_finite() && *v > 0. && *v <= 10000.)
+        })
+        .map(|mut values| {
+            values[1] = values[1].clamp(48., 120.);
+            values
+        })
+        .unwrap_or([0.45, 64., 0.40, 0.15])
+}
+
+/// Restore the divider's pair without changing the other columns' preferences.
+fn reset_column(columns: &[(Column, f32)], slot: usize, saved: Option<[f32; 4]>) -> [f32; 4] {
+    let defaults = column_preferences(None);
+    if slot == 1 {
+        let protocol = columns.iter().find(|c| c.0 == Column::Protocol).unwrap().1;
+        return resize_column(columns, slot, defaults[1] - protocol, saved);
+    }
+    let mut preferred = column_preferences(saved);
+    let donor = if slot == 2 { 3 } else { 2 };
+    let total = preferred[slot] + preferred[donor];
+    preferred[slot] = total * defaults[slot] / (defaults[slot] + defaults[donor]);
+    preferred[donor] = total - preferred[slot];
+    preferred
+}
+
+/// Transfer space from another text column, keeping the table within the window.
+fn resize_column(
+    columns: &[(Column, f32)],
+    slot: usize,
+    delta: f32,
+    saved: Option<[f32; 4]>,
+) -> [f32; 4] {
+    let mut preferred = column_preferences(saved);
+    let donor = if slot == 2 { 3 } else { 2 };
+    let width = |slot| {
+        columns
+            .iter()
+            .find(|(c, _)| c.slot() == Some(slot))
+            .unwrap()
+            .1
+    };
+    let change = delta.clamp((48. - width(slot)).min(0.), (width(donor) - 48.).max(0.));
+    let change = if slot == 1 {
+        change.min(120. - width(slot))
+    } else {
+        change
+    };
+    let weight: f32 = columns
+        .iter()
+        .filter(|(c, _)| c.flexible())
+        .map(|(c, _)| preferred[c.slot().unwrap()])
+        .sum();
+    let space: f32 = columns
+        .iter()
+        .filter(|(c, _)| c.flexible())
+        .map(|(_, w)| w - 48.)
+        .sum();
+    for (column, w) in columns {
+        if let Some(i) = column.slot() {
+            let adjusted = *w
+                + if i == slot {
+                    change
+                } else if i == donor {
+                    -change
+                } else {
+                    0.
+                };
+            preferred[i] = if i == 1 {
+                adjusted
+            } else {
+                (adjusted - 48.).max(0.0001) / space.max(0.0001) * weight
+            };
+        }
+    }
+    preferred
 }
 
 /// A connection's user and address, as typed for quick connect.
@@ -1054,5 +1233,82 @@ pub(super) fn target_label(c: &Connection) -> String {
         c.address()
     } else {
         format!("{}@{}", c.username, c.address())
+    }
+}
+
+#[cfg(test)]
+mod column_tests {
+    use super::*;
+
+    #[test]
+    fn resizing_each_column_preserves_the_table_width_and_other_columns() {
+        let columns = table_columns(1000., None);
+        for slot in 0..4 {
+            for delta in [-10000., -20., 20., 10000.] {
+                let saved = resize_column(&columns, slot, delta, None);
+                let resized = table_columns(1000., Some(saved));
+                let donor = if slot == 2 { 3 } else { 2 };
+                for ((column, before), (_, after)) in columns.iter().zip(&resized) {
+                    assert!(*after >= 28. && after.is_finite());
+                    if column.slot() != Some(slot) && column.slot() != Some(donor) {
+                        assert!((before - after).abs() < 0.01, "{slot}: {column:?}");
+                    }
+                }
+                assert!((resized.iter().map(|c| c.1).sum::<f32>() + GAP * 5. - 1000.).abs() < 0.01);
+            }
+        }
+    }
+
+    #[test]
+    fn resetting_a_divider_restores_default_proportions_and_preserves_other_columns() {
+        for width in [500., 700., 1000.] {
+            let saved = [0.7, 90., 0.2, 0.1];
+            let columns = table_columns(width, Some(saved));
+            for slot in 0..3 {
+                if !columns.iter().any(|(c, _)| c.slot() == Some(slot))
+                    || (slot == 2 && width < 720.)
+                {
+                    continue;
+                }
+                let reset = reset_column(&columns, slot, Some(saved));
+                let restored = table_columns(width, Some(reset));
+                let donor = if slot == 2 { 3 } else { 2 };
+                for ((column, before), (_, after)) in columns.iter().zip(&restored) {
+                    if column.slot() != Some(slot) && column.slot() != Some(donor) {
+                        assert!((before - after).abs() < 0.01);
+                    }
+                }
+                if slot == 1 {
+                    assert_eq!(reset[1], 64.);
+                } else {
+                    let defaults = column_preferences(None);
+                    assert!(
+                        (reset[slot] / reset[donor] - defaults[slot] / defaults[donor]).abs()
+                            < 0.001
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_preferences_fall_back_and_narrow_windows_keep_saved_sizes() {
+        for values in [[f32::NAN; 4], [-1.; 4], [0.; 4], [f32::MAX; 4]] {
+            assert_eq!(table_columns(900., Some(values)), table_columns(900., None));
+        }
+        let saved = resize_column(&table_columns(1000., None), 0, 50., None);
+        let narrow_saved = resize_column(&table_columns(500., Some(saved)), 0, 20., Some(saved));
+        assert_eq!(narrow_saved[3], saved[3]);
+        assert_eq!(narrow_saved[1], saved[1]);
+        for width in [240., 400., 559., 560., 719., 720., 1400.] {
+            let columns = table_columns(width, Some(saved));
+            assert!(columns.iter().all(|c| c.1 > 0.));
+            assert!(
+                (columns.iter().map(|c| c.1).sum::<f32>() + GAP * (columns.len() - 1) as f32
+                    - width)
+                    .abs()
+                    < 0.01
+            );
+        }
     }
 }

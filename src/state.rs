@@ -61,6 +61,8 @@ pub struct State {
     /// The workspace zoom, where 1 is 100%; `None` until it is changed.
     pub zoom: Option<f32>,
     pub sidebar_collapsed: Option<bool>,
+    /// Name, protocol, host/user, group: text columns use flexible weights, protocol uses points.
+    pub library_columns: Option<[f32; 4]>,
     pub library: Library,
     /// Server libraries opened without TLS; the default is to require it.
     pub mssql_without_tls: bool,
@@ -360,6 +362,7 @@ mod tests {
         let state = State {
             window: Some([1400., 900.]),
             maximized: true,
+            library_columns: Some([220., 64., 260., 100.]),
             sidebar_collapsed: Some(true),
             library: Library::Sqlite(PathBuf::from(r"\\server\team\relay.sqlite")),
             ..State::default()

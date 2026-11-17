@@ -10,77 +10,96 @@ impl App {
             return;
         };
         let mut c = c.clone();
+        let focused = ctx.memory(|memory| memory.focused());
+        let enter_saves = !egui::Popup::is_any_open(ctx)
+            && focused.is_none_or(|id| egui::TextEdit::load_state(ctx, id).is_some());
         let mut save = false;
         let mut cancel = false;
         let groups: std::collections::BTreeSet<_> =
             self.connections.iter().map(|c| c.group.clone()).collect();
-        let fields_height = (ctx.content_rect().height() - 300.).max(200.);
         let parent = self.parent;
         let mut notes_focused = false;
         dialog("edit-connection", ctx).show(ctx, |ui| {
-            ui.set_width(440.);
+            ui.set_width(dialog_width(ctx, 440.));
+            ui.spacing_mut().item_spacing.y = 6.;
             let title = if c.id == 0 {
                 "New connection"
             } else {
                 "Edit connection"
             };
             ui.label(RichText::new(title).size(TITLE_SIZE).strong());
-            ui.add_space(8.);
+            ui.horizontal(|ui| {
+                let count = Protocol::ALL.len() as f32;
+                let width =
+                    (ui.available_width() - ui.spacing().item_spacing.x * (count - 1.)) / count;
+                for protocol in Protocol::ALL {
+                    let button =
+                        egui::Button::new(protocol.label()).selected(c.protocol == protocol);
+                    if ui.add_sized([width, CONTROL_HEIGHT], button).clicked() {
+                        switch_protocol(&mut c, protocol, self.editor_port.is_some());
+                    }
+                }
+            });
+            let footer_error = validation_field(&self.editor_error)
+                .is_none_or(|field| !validation_visible(c.protocol, field));
+            let compact_error = ctx.content_rect().height() < 480.;
+            let error_height = if footer_error && !self.editor_error.is_empty() && compact_error {
+                ui.text_style_height(&egui::TextStyle::Body) + 6.
+            } else if footer_error && !self.editor_error.is_empty() {
+                ui.fonts_mut(|fonts| {
+                    fonts.layout(
+                        self.editor_error.clone(),
+                        egui::FontId::proportional(13.),
+                        ui.visuals().error_fg_color,
+                        ui.available_width(),
+                    )
+                })
+                .size()
+                .y + 6.
+            } else {
+                0.
+            };
+            let fields_height = (ctx.content_rect().height() - 230. - error_height).max(24.);
             egui::ScrollArea::vertical()
                 .id_salt("editor-fields")
                 .max_height(fields_height)
+                .auto_shrink([false, true])
                 .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        let count = Protocol::ALL.len() as f32;
-                        let width = (ui.available_width()
-                            - ui.spacing().item_spacing.x * (count - 1.))
-                            / count;
-                        for protocol in Protocol::ALL {
-                            let button = egui::Button::new(protocol.label())
-                                .selected(c.protocol == protocol);
-                            if ui.add_sized([width, CONTROL_HEIGHT], button).clicked() {
-                                if c.port == c.protocol.port() {
-                                    c.port = protocol.port();
-                                }
-                                c.protocol = protocol;
-                            }
-                        }
-                    });
-                    ui.add_space(10.);
                     field(
                         ui,
                         "Connection name",
                         &mut c.name,
                         "e.g. Office workstation",
                     );
+                    validation(ui, &self.editor_error, "name");
                     ui.horizontal_top(|ui| {
                         let port_width = 96.;
                         let host_width =
                             ui.available_width() - port_width - ui.spacing().item_spacing.x;
                         labeled(ui, "Host / IP address", |ui| {
+                            ui.set_width(host_width);
                             ui.add_sized(
                                 [host_width, CONTROL_HEIGHT],
                                 input(&mut c.host, "e.g. 192.168.1.20"),
                             );
+                            validation(ui, &self.editor_error, "host");
                         });
                         labeled(ui, "Port", |ui| {
-                            // Digits only; an empty field reads as 0, which validation rejects.
-                            let mut port = if c.port == 0 {
-                                String::new()
-                            } else {
-                                c.port.to_string()
-                            };
-                            let response =
-                                ui.add_sized([port_width, CONTROL_HEIGHT], input(&mut port, ""));
+                            ui.set_width(port_width);
+                            let mut port = self
+                                .editor_port
+                                .clone()
+                                .unwrap_or_else(|| c.port.to_string());
+                            let response = ui.add_sized(
+                                [port_width, CONTROL_HEIGHT],
+                                input(&mut port, "1–65535").id(egui::Id::new("connection-port")),
+                            );
                             if response.changed() {
-                                let digits: String =
-                                    port.chars().filter(char::is_ascii_digit).collect();
-                                c.port = digits.parse().unwrap_or(if digits.is_empty() {
-                                    0
-                                } else {
-                                    c.port
-                                });
+                                port.retain(|c| c.is_ascii_digit());
+                                c.port = port.parse().unwrap_or(0);
+                                self.editor_port = Some(port);
                             }
+                            validation(ui, &self.editor_error, "port");
                         });
                     });
                     let user_hint = match c.protocol {
@@ -89,6 +108,7 @@ impl App {
                         Protocol::Vnc => "for a Mac, an account on it",
                     };
                     field(ui, "Username (optional)", &mut c.username, user_hint);
+                    validation(ui, &self.editor_error, "username");
                     labeled(ui, "Group", |ui| group_input(ui, &mut c.group, &groups));
                     labeled(ui, "Notes (optional)", |ui| {
                         let notes = egui::TextEdit::multiline(&mut c.notes)
@@ -98,19 +118,25 @@ impl App {
                                     .weak(),
                             )
                             .margin(egui::Margin::symmetric(10, 6))
-                            .desired_rows(3)
+                            .desired_rows(2)
                             .desired_width(f32::INFINITY);
                         notes_focused = ui.add(notes).has_focus();
                     });
                     ui.add_space(2.);
-                    ui.checkbox(&mut c.favorite, "Add to favorites");
+                    option_checkbox(ui, &mut c.favorite, "Add to favorites");
                     // The optional settings start a section of their own.
-                    ui.add_space(10.);
+                    ui.add_space(4.);
                     ui.separator();
                     ui.add_space(2.);
                     match c.protocol {
-                        Protocol::Rdp => rdp_options(ui, &mut c.rdp),
-                        Protocol::Ssh => ssh_options(ui, &mut c.ssh, parent),
+                        Protocol::Rdp => rdp_options(ui, &mut c.rdp, &self.editor_error),
+                        Protocol::Ssh => ssh_options(
+                            ui,
+                            &mut c.ssh,
+                            parent,
+                            &self.editor_error,
+                            &mut self.editor_forwards_touched,
+                        ),
                         Protocol::Vnc => vnc_options(ui, &mut c.vnc),
                     }
                 });
@@ -123,13 +149,43 @@ impl App {
                 }
                 Protocol::Vnc => vnc::SIGN_IN_HELP,
             };
-            ui.label(RichText::new(help).size(12.).color(colors.muted));
-            if !self.editor_error.is_empty() {
-                ui.colored_label(ui.visuals().error_fg_color, &self.editor_error);
+            if c.protocol == Protocol::Vnc {
+                ui.label(
+                    RichText::new("VNC is unencrypted. Use a trusted network or SSH tunnel.")
+                        .size(12.)
+                        .color(ui.visuals().warn_fg_color),
+                )
+                .on_hover_text(help);
+            } else {
+                ui.label(
+                    RichText::new("Authentication is handled when connecting.")
+                        .size(12.)
+                        .color(colors.muted),
+                )
+                .on_hover_text(help);
             }
-            ui.add_space(12.);
+            if !self.editor_error.is_empty() && footer_error {
+                let label = egui::Label::new(
+                    RichText::new(&self.editor_error).color(ui.visuals().error_fg_color),
+                );
+                ui.add(if compact_error {
+                    label.truncate()
+                } else {
+                    label.wrap()
+                })
+                .on_hover_text(&self.editor_error);
+            }
             ui.horizontal(|ui| {
-                save = accent_button(ui, "Save connection", 140.).clicked();
+                save = accent_button(
+                    ui,
+                    if c.id == 0 {
+                        "Create connection"
+                    } else {
+                        "Save changes"
+                    },
+                    140.,
+                )
+                .clicked();
                 cancel = outline_button(ui, "Cancel", 80.).clicked();
             });
             ui.label(
@@ -149,9 +205,13 @@ impl App {
             return;
         }
         // Enter starts a new line in the notes rather than saving.
-        save |= enter && !notes_focused;
+        save |= enter && enter_saves && !notes_focused;
+        if validation_field(&self.editor_error).is_some() {
+            self.editor_error = c.clone().validate().err().unwrap_or_default();
+        }
         if save && let Err(e) = c.validate() {
             self.editor_error = e;
+            ctx.data_mut(|data| data.insert_temp(egui::Id::new("editor-reveal-error"), true));
             save = false;
         }
         self.modal = Modal::Editor(c.clone());
@@ -202,9 +262,12 @@ pub(super) fn ssh_options(
     ui: &mut egui::Ui,
     options: &mut model::SshOptions,
     parent: Option<platform::Window>,
+    error: &str,
+    forwards_touched: &mut bool,
 ) {
     egui::CollapsingHeader::new("SSH options")
         .id_salt("ssh-options")
+        .open(matches!(validation_field(error), Some("jump" | "identity" | "forwards")).then_some(true))
         .default_open(*options != model::SshOptions::default())
         .show(ui, |ui| {
             field(
@@ -213,6 +276,7 @@ pub(super) fn ssh_options(
                 &mut options.jump,
                 "user@bastion.example.com:22",
             );
+            validation(ui, error, "jump");
             labeled(ui, "Identity file (optional)", |ui| {
                 ui.horizontal(|ui| {
                     let browse = 80.;
@@ -235,20 +299,17 @@ pub(super) fn ssh_options(
                     }
                 });
             });
-            field(
-                ui,
-                "Port forwards (optional)",
-                &mut options.forwards,
-                "L8080:localhost:80, R9000:localhost:9000, D1080",
-            );
-            ui.label(
-                RichText::new(
-                    "L forwards a local port to the remote side, R the reverse, and D opens a \
-                     SOCKS proxy.",
-                )
-                .size(11.)
-                .color(theme::palette(ui.ctx()).muted),
-            );
+            validation(ui, error, "identity");
+            labeled(ui, "Port forwards (optional)", |ui| {
+                let response = ui.add_sized([ui.available_width(), CONTROL_HEIGHT],
+                    input(&mut options.forwards, "L8080:localhost:80, R9000:localhost:9000, D1080"))
+                    .on_hover_text("Comma-separated forwards: L8080:localhost:80 (local), R9000:localhost:9000 (remote), D1080 (SOCKS proxy).");
+                *forwards_touched |= response.changed();
+                if (*forwards_touched || validation_field(error) == Some("forwards"))
+                    && let Err(error) = options.forward_args() {
+                    validation(ui, &error, "forwards");
+                }
+            });
         });
 }
 
@@ -257,21 +318,21 @@ pub(super) fn vnc_options(ui: &mut egui::Ui, options: &mut model::VncOptions) {
         .id_salt("vnc-options")
         .default_open(*options != model::VncOptions::default())
         .show(ui, |ui| {
-            ui.checkbox(
-                &mut options.clipboard,
-                "Share copied text with the remote computer",
-            );
-            ui.checkbox(&mut options.view_only, "View only")
+            option_checkbox(ui, &mut options.clipboard, "Clipboard synchronization")
+                .on_hover_text("Share copied text with the remote computer");
+            option_checkbox(ui, &mut options.view_only, "View only")
                 .on_hover_text("Shows the remote screen without sending keys or the pointer");
         });
 }
 
-pub(super) fn rdp_options(ui: &mut egui::Ui, options: &mut model::RdpOptions) {
+pub(super) fn rdp_options(ui: &mut egui::Ui, options: &mut model::RdpOptions, error: &str) {
     use model::{Audio, Display, Keys};
     egui::CollapsingHeader::new("Remote desktop options")
         .id_salt("rdp-options")
+        .open(matches!(validation_field(error), Some("gateway" | "resolution")).then_some(true))
         .default_open(*options != model::RdpOptions::default())
         .show(ui, |ui| {
+            section_label(ui, "GATEWAY");
             field(
                 ui,
                 "RD Gateway (optional)",
@@ -279,22 +340,31 @@ pub(super) fn rdp_options(ui: &mut egui::Ui, options: &mut model::RdpOptions) {
                 "gateway.example.com",
             );
             ui.add_space(6.);
-            // Every option has its label above it, as the fields do.
-            labeled(ui, "Use on the remote computer", |ui| {
-                egui::Grid::new("rdp-resources")
-                    .num_columns(3)
-                    .spacing([24., 8.])
-                    .show(ui, |ui| {
-                        ui.checkbox(&mut options.clipboard, "Clipboard");
-                        ui.checkbox(&mut options.drives, "Local drives");
-                        ui.checkbox(&mut options.printers, "Printers");
-                        ui.end_row();
-                        ui.checkbox(&mut options.smart_cards, "Smart cards");
-                        ui.checkbox(&mut options.microphone, "Microphone");
-                        ui.end_row();
-                    });
-            });
+            validation(ui, error, "gateway");
+            section_label(ui, "DEVICE REDIRECTION");
+            let columns = if ui.available_width() < 360. { 2 } else { 3 };
+            egui::Grid::new("rdp-resources")
+                .num_columns(columns)
+                .spacing([16., 4.])
+                .show(ui, |ui| {
+                    for (i, (value, label)) in [
+                        (&mut options.clipboard, "Clipboard"),
+                        (&mut options.drives, "Local drives"),
+                        (&mut options.printers, "Printers"),
+                        (&mut options.smart_cards, "Smart cards"),
+                        (&mut options.microphone, "Microphone"),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        option_checkbox(ui, value, label);
+                        if (i + 1) % columns == 0 {
+                            ui.end_row();
+                        }
+                    }
+                });
             ui.add_space(6.);
+            section_label(ui, "DISPLAY AND AUDIO");
             let width = ui.available_width();
             // Drop-downs as tall as the text fields above them.
             ui.spacing_mut().interact_size.y = CONTROL_HEIGHT;
@@ -308,8 +378,7 @@ pub(super) fn rdp_options(ui: &mut egui::Ui, options: &mut model::RdpOptions) {
                         }
                     });
             });
-            ui.add_space(6.);
-            labeled(ui, "System key combinations, such as Alt+Tab", |ui| {
+            labeled(ui, "System key combinations", |ui| {
                 egui::ComboBox::from_id_salt("rdp-keys")
                     .width(width)
                     .selected_text(options.keys.label())
@@ -319,12 +388,11 @@ pub(super) fn rdp_options(ui: &mut egui::Ui, options: &mut model::RdpOptions) {
                         }
                     });
             });
-            ui.add_space(6.);
             labeled(ui, "Resolution", |ui| {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.radio_value(&mut options.display, Display::Fit, "Fit to tab");
                     let fixed = matches!(options.display, Display::Fixed { .. });
-                    if ui.radio(fixed, "Fixed").clicked() && !fixed {
+                    if ui.radio(fixed, "Fixed resolution").clicked() && !fixed {
                         options.display = Display::Fixed {
                             width: 1920,
                             height: 1080,
@@ -337,6 +405,7 @@ pub(super) fn rdp_options(ui: &mut egui::Ui, options: &mut model::RdpOptions) {
                     }
                 });
             });
+            validation(ui, error, "resolution");
         });
     // Shown outside the collapsed options too, since the defaults can be affected.
     let missing = rdp::unsupported(options);
@@ -351,11 +420,110 @@ pub(super) fn rdp_options(ui: &mut egui::Ui, options: &mut model::RdpOptions) {
     }
 }
 
+/// Native checkbox behavior and focus handling, with square corners distinct from radios.
+fn option_checkbox(ui: &mut egui::Ui, checked: &mut bool, text: &str) -> egui::Response {
+    ui.scope(|ui| {
+        let widgets = &mut ui.visuals_mut().widgets;
+        for widget in [
+            &mut widgets.inactive,
+            &mut widgets.hovered,
+            &mut widgets.active,
+            &mut widgets.noninteractive,
+            &mut widgets.open,
+        ] {
+            widget.corner_radius = egui::CornerRadius::same(2);
+        }
+        ui.checkbox(checked, text)
+    })
+    .inner
+}
+
+fn switch_protocol(c: &mut Connection, protocol: Protocol, port_edited: bool) {
+    if c.id == 0 && !port_edited && c.port == c.protocol.port() {
+        c.port = protocol.port();
+    }
+    c.protocol = protocol;
+}
+
+/// Route the existing model's validation messages without duplicating its validation rules.
+fn validation_field(error: &str) -> Option<&'static str> {
+    [
+        ("Give this connection", "name"),
+        ("Names cannot", "name"),
+        ("Enter a hostname", "host"),
+        ("Use the separate Port", "host"),
+        ("The username", "username"),
+        ("Port must", "port"),
+        ("Enter the RD Gateway", "gateway"),
+        ("Enter jump hosts", "jump"),
+        ("Enter the identity file", "identity"),
+        ("Port forward", "forwards"),
+        ("A fixed resolution", "resolution"),
+    ]
+    .into_iter()
+    .find_map(|(prefix, field)| error.starts_with(prefix).then_some(field))
+}
+
+fn validation_visible(protocol: Protocol, field: &str) -> bool {
+    match field {
+        "gateway" | "resolution" => protocol == Protocol::Rdp,
+        "jump" | "identity" | "forwards" => protocol == Protocol::Ssh,
+        _ => true,
+    }
+}
+
+fn validation(ui: &mut egui::Ui, error: &str, field: &str) {
+    if validation_field(error) == Some(field) {
+        let text = if field == "port" {
+            "Use 1–65535."
+        } else {
+            error
+        };
+        let response = ui
+            .add(
+                egui::Label::new(
+                    RichText::new(text)
+                        .size(11.)
+                        .color(ui.visuals().error_fg_color),
+                )
+                .wrap(),
+            )
+            .on_hover_text(error);
+        if ui
+            .data_mut(|data| data.remove_temp::<bool>(egui::Id::new("editor-reveal-error")))
+            .unwrap_or(false)
+        {
+            response.scroll_to_me(Some(egui::Align::Center));
+        }
+    }
+}
+
 /// `items` as an English list: "a", "a and b", "a, b and c".
 fn list(items: &[&str]) -> String {
     match items {
         [] => String::new(),
         [one] => (*one).into(),
         [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn switching_protocol_changes_only_untouched_new_default_ports() {
+        for (id, port, edited, expected) in [
+            (0, 3389, false, 22),
+            (0, 3389, true, 3389),
+            (0, 2222, false, 2222),
+            (1, 3389, false, 3389),
+        ] {
+            let mut c = Connection::new();
+            c.id = id;
+            c.port = port;
+            switch_protocol(&mut c, Protocol::Ssh, edited);
+            assert_eq!(c.port, expected);
+        }
     }
 }

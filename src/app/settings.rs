@@ -535,11 +535,6 @@ impl App {
                 ui,
                 "Keep service checks, log commands, and deployment steps close at hand.",
             );
-            ui.label(
-                RichText::new("systemctl status nginx")
-                    .monospace()
-                    .color(colors.muted),
-            );
             ui.add_space(ROW_GAP);
         }
         let mut edit = None;

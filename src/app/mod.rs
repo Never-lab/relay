@@ -145,6 +145,9 @@ struct App {
     /// The quit confirmation overlays `modal`, which returns when the user keeps working.
     quitting: bool,
     editor_error: String,
+    /// Raw port text after editing; also prevents automatic port replacement.
+    editor_port: Option<String>,
+    editor_forwards_touched: bool,
     /// The edited connection as saved when the editor opened, to keep others' edits since.
     editor_base: Option<Connection>,
     error: Option<String>,
@@ -313,6 +316,8 @@ impl App {
             modal: Modal::None,
             quitting: false,
             editor_error: String::new(),
+            editor_port: None,
+            editor_forwards_touched: false,
             editor_base: None,
             storage_ok: error.is_none(),
             error,
@@ -1146,6 +1151,10 @@ impl App {
         self.editor_base = Some(connection.clone()).filter(|c| c.id != 0);
         self.modal = Modal::Editor(connection);
         self.editor_error.clear();
+        self.editor_port = None;
+        self.editor_forwards_touched = false;
+        self.ctx
+            .data_mut(|data| data.remove::<bool>(egui::Id::new("editor-reveal-error")));
     }
 
     /// Shows the current notice in a corner without moving the page, until it expires.

@@ -1053,12 +1053,17 @@ fn recent_history_is_pruned_only_after_successful_library_operations() {
 
 #[test]
 fn narrow_tables_drop_columns_and_fit() {
-    let kinds = |width| -> Vec<_> { table_columns(width).into_iter().map(|c| c.0).collect() };
+    let kinds = |width| -> Vec<_> {
+        table_columns(width, None)
+            .into_iter()
+            .map(|c| c.0)
+            .collect()
+    };
     assert!(kinds(900.).contains(&Column::Group));
     assert!(!kinds(700.).contains(&Column::Group) && kinds(700.).contains(&Column::Protocol));
     assert!(!kinds(500.).contains(&Column::Protocol));
     for width in [500., 700., 900., 1400.] {
-        let columns = table_columns(width);
+        let columns = table_columns(width, None);
         let used: f32 = columns.iter().map(|c| c.1).sum::<f32>() + GAP * (columns.len() - 1) as f32;
         assert!((used - width).abs() < 0.5, "{width}: {used}");
     }
@@ -2445,4 +2450,315 @@ fn terminal_settings_scroll_to_the_last_section() {
         last_visible,
         "the last terminal setting is reachable by scrolling"
     );
+}
+
+#[test]
+fn library_filters_combine_with_search_and_cached_counts() {
+    let ctx = egui::Context::default();
+    let mut app = test_app(&ctx);
+    app.connections[0].group = "Production".into();
+    app.connections[1].group = "Production".into();
+    app.connections[0].favorite = true;
+    app.state.note_recent(&app.location, 1);
+    app.state.note_recent(&app.location, 3);
+    assert_eq!(
+        app.groups().iter().find(|g| g.0 == "Production").unwrap().1,
+        2
+    );
+    assert_eq!(app.counts().favorites, 1);
+    assert_eq!(app.counts().recent, 2);
+    app.group = Some("Production".into());
+    assert_eq!(&*app.filtered(), &[0, 1]);
+    app.query = "bravo".into();
+    assert_eq!(&*app.filtered(), &[1]);
+    app.filter = Filter::Favorites;
+    assert!(app.filtered().is_empty());
+    app.query = "alpha".into();
+    assert_eq!(&*app.filtered(), &[0]);
+    app.filter = Filter::Recent;
+    assert_eq!(&*app.filtered(), &[0]);
+    app.group = None;
+    app.query.clear();
+    assert_eq!(&*app.filtered(), &[2, 0]);
+    app.filter = Filter::All;
+    assert_eq!(&*app.filtered(), &[0, 1, 2]);
+}
+
+#[test]
+fn dragging_and_resetting_library_columns_save_their_widths_for_restart() {
+    let ctx = egui::Context::default();
+    let mut app = test_app(&ctx);
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join(model::temp_name("column-state.json"));
+    app.state_path = Some(path.clone());
+    let frame = |app: &mut App, events| {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(1000., 600.),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.connection_table(ui, &[0, 1, 2]));
+            },
+        )
+    };
+    let output = frame(&mut app, vec![]);
+    let handle = output
+        .shapes
+        .iter()
+        .find_map(|s| match &s.shape {
+            egui::Shape::LineSegment { points, .. } if points[0].x == points[1].x => {
+                Some(points[0].lerp(points[1], 0.5))
+            }
+            _ => None,
+        })
+        .expect("a column resize handle");
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        pressed,
+        button: egui::PointerButton::Primary,
+        modifiers: egui::Modifiers::NONE,
+    };
+    frame(&mut app, vec![egui::Event::PointerMoved(handle)]);
+    frame(&mut app, vec![button(handle, true)]);
+    let dragged = handle + Vec2::new(40., 0.);
+    frame(&mut app, vec![egui::Event::PointerMoved(dragged)]);
+    frame(&mut app, vec![button(dragged, false)]);
+    let saved = state::load(&path);
+    assert!(
+        saved.library_columns.is_some(),
+        "dragging saves column preferences"
+    );
+    assert_eq!(saved.library_columns, app.state.library_columns);
+    let width = output
+        .shapes
+        .iter()
+        .find_map(|s| match &s.shape {
+            egui::Shape::LineSegment { points, .. } if points[0].y == points[1].y => {
+                Some(points[1].x - points[0].x)
+            }
+            _ => None,
+        })
+        .unwrap();
+    let defaults = table_columns(width, None);
+    let restored = table_columns(width, saved.library_columns);
+    let name = |columns: &[(Column, f32)]| columns.iter().find(|c| c.0 == Column::Name).unwrap().1;
+    assert!(
+        (name(&restored) - name(&defaults) - 40.).abs() < 0.1,
+        "{} -> {} at {width}",
+        name(&defaults),
+        name(&restored)
+    );
+    let output = frame(&mut app, vec![]);
+    let handle = output
+        .shapes
+        .iter()
+        .find_map(|s| match &s.shape {
+            egui::Shape::LineSegment { points, .. } if points[0].x == points[1].x => {
+                Some(points[0].lerp(points[1], 0.5))
+            }
+            _ => None,
+        })
+        .unwrap();
+    frame(&mut app, vec![egui::Event::PointerMoved(handle)]);
+    for _ in 0..2 {
+        frame(&mut app, vec![button(handle, true)]);
+        frame(&mut app, vec![button(handle, false)]);
+    }
+    let saved = state::load(&path);
+    assert_eq!(saved.library_columns, app.state.library_columns);
+    let reset = table_columns(width, saved.library_columns);
+    for ((_, expected), (_, actual)) in defaults.iter().zip(&reset) {
+        assert!(
+            (expected - actual).abs() < 0.01,
+            "double-click restores default sizing"
+        );
+    }
+    std::fs::remove_file(path).unwrap();
+}
+
+fn connection_editor_frame(
+    app: &mut App,
+    ctx: &egui::Context,
+    size: Vec2,
+    events: Vec<egui::Event>,
+) -> egui::FullOutput {
+    ctx.run(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, size)),
+            events,
+            ..Default::default()
+        },
+        |ctx| app.editor(ctx),
+    )
+}
+
+#[test]
+fn connection_editor_keeps_header_and_actions_visible_across_themes_and_sizes() {
+    for theme in theme::Theme::ALL {
+        for size in [
+            Vec2::new(1200., 800.),
+            Vec2::new(480., 360.),
+            Vec2::new(400., 300.),
+        ] {
+            for protocol in Protocol::ALL {
+                let ctx = egui::Context::default();
+                apply_style(&ctx);
+                theme.apply(&ctx);
+                let mut app = test_app(&ctx);
+                let mut c = app.connections[0].clone();
+                c.protocol = protocol;
+                c.port = protocol.port();
+                c.rdp.gateway = "gateway.example.com".into();
+                c.rdp.display = model::Display::Fixed {
+                    width: 1920,
+                    height: 1080,
+                };
+                c.ssh.forwards = "L8080:localhost:80".into();
+                c.vnc.view_only = true;
+                app.edit(c);
+                for frame in 0..12 {
+                    if frame == 8 {
+                        app.editor_error = "Enter a hostname, IPv4 address, or bare IPv6 address (without a port).".into();
+                    }
+                    if frame == 9 {
+                        app.editor_error = "Someone else changed this connection while you edited. Save again to replace their values with yours, or Cancel to keep theirs.".into();
+                    }
+                    let output = connection_editor_frame(
+                        &mut app,
+                        &ctx,
+                        size,
+                        if frame >= 3 {
+                            vec![
+                                egui::Event::PointerMoved(egui::pos2(size.x / 2., size.y / 2.)),
+                                egui::Event::MouseWheel {
+                                    unit: egui::MouseWheelUnit::Point,
+                                    delta: Vec2::new(0., -1000.),
+                                    modifiers: egui::Modifiers::NONE,
+                                },
+                            ]
+                        } else {
+                            vec![]
+                        },
+                    );
+                    if frame < 2 {
+                        continue;
+                    }
+                    if frame == 7 {
+                        let last = match protocol {
+                            Protocol::Rdp => "Fixed resolution",
+                            Protocol::Ssh => "Port forwards (optional)",
+                            Protocol::Vnc => "View only",
+                        };
+                        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+                            egui::Shape::Text(text) if text.galley.text() == last && shape.clip_rect.contains_rect(text.visual_bounding_rect()))),
+                            "{theme:?} {protocol:?} {size:?}: last setting unreachable");
+                    }
+                    let screen = Rect::from_min_size(egui::Pos2::ZERO, size);
+                    for label in [
+                        "Edit connection",
+                        "RDP",
+                        "SSH",
+                        "VNC",
+                        "Save changes",
+                        "Cancel",
+                    ] {
+                        assert!(
+                            output.shapes.iter().any(|shape| matches!(&shape.shape,
+                            egui::Shape::Text(text) if text.galley.text() == label
+                                && screen.contains_rect(text.visual_bounding_rect())
+                                && shape.clip_rect.contains_rect(text.visual_bounding_rect()))),
+                            "{theme:?} {protocol:?} {size:?}: {label} clipped"
+                        );
+                    }
+                    let rect = ctx
+                        .memory(|m| m.area_rect(egui::Id::new("edit-connection")))
+                        .unwrap();
+                    assert!(
+                        rect.width() <= size.x && rect.height() <= size.y,
+                        "{theme:?} {protocol:?} {size:?}: modal {rect:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn connection_editor_preserves_protocol_options_ports_and_cancelled_changes() {
+    let ctx = egui::Context::default();
+    apply_style(&ctx);
+    ctx.style_mut(|style| style.animation_time = 0.);
+    let mut app = test_app(&ctx);
+    let original = app.connections.clone();
+    let mut c = Connection::new();
+    c.name = "Draft".into();
+    c.host = "draft.example".into();
+    c.rdp.gateway = "gateway.example".into();
+    c.ssh.jump = "jump.example".into();
+    c.vnc.view_only = true;
+    let draft = c.clone();
+    app.edit(c);
+    let frame =
+        |app: &mut App, events| connection_editor_frame(app, &ctx, Vec2::new(1200., 900.), events);
+    for protocol in [Protocol::Ssh, Protocol::Vnc, Protocol::Rdp] {
+        let mut output = frame(&mut app, vec![]);
+        for _ in 0..8 {
+            output = frame(&mut app, vec![]);
+        }
+        let pos = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == protocol.label() => {
+                    Some(text.visual_bounding_rect().center())
+                }
+                _ => None,
+            })
+            .unwrap();
+        frame(&mut app, vec![egui::Event::PointerMoved(pos)]);
+        for pressed in [true, false] {
+            frame(
+                &mut app,
+                vec![egui::Event::PointerButton {
+                    pos,
+                    pressed,
+                    button: egui::PointerButton::Primary,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+        }
+        let Modal::Editor(c) = &app.modal else {
+            panic!("draft closed");
+        };
+        assert_eq!(c.protocol, protocol);
+        assert_eq!(c.port, protocol.port());
+        assert_eq!(
+            (&c.rdp, &c.ssh, &c.vnc),
+            (&draft.rdp, &draft.ssh, &draft.vnc)
+        );
+    }
+    ctx.memory_mut(|m| m.request_focus(egui::Id::new("connection-port")));
+    frame(
+        &mut app,
+        vec![
+            key(egui::Key::A, egui::Modifiers::COMMAND),
+            egui::Event::Text("99999".into()),
+        ],
+    );
+    frame(&mut app, vec![press(egui::Key::Enter)]);
+    assert_eq!(app.editor_port.as_deref(), Some("99999"));
+    assert!(app.editor_error.contains("Port must"));
+    assert!(matches!(&app.modal, Modal::Editor(c) if c.port == 0));
+    assert_eq!(app.connections, original);
+    frame(&mut app, vec![press(egui::Key::Escape)]);
+    assert!(matches!(app.modal, Modal::None));
+    assert_eq!(app.connections, original);
+    app.edit(Connection::new());
+    assert!(app.editor_port.is_none());
 }
