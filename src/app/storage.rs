@@ -33,6 +33,8 @@ impl App {
             Ok(snapshot) => {
                 self.set_connections(snapshot.connections);
                 self.revision = snapshot.revision;
+                self.pending_sync = None;
+                self.ignored_sync_revision = None;
                 self.storage_ok = true;
                 let mut remember_error = None;
                 let saved = self.pending_save;
@@ -42,8 +44,6 @@ impl App {
                     self.state.use_library(&location);
                     self.save_state();
                     self.location = location;
-                    self.pending_sync = None;
-                    self.ignored_sync_revision = None;
                     if matches!(self.modal, Modal::Library) {
                         self.modal = Modal::None;
                     }
@@ -110,6 +110,7 @@ impl App {
                             // Notes/favorites-only: no phishing surface, apply quietly.
                             self.set_connections(snapshot.connections);
                             self.revision = snapshot.revision;
+                            self.ignored_sync_revision = None;
                             self.forget_removed();
                         } else {
                             self.pending_sync = Some(snapshot);
@@ -136,7 +137,7 @@ impl App {
             self.synced = Instant::now();
             self.sync = Some(database::changes(
                 self.location.clone(),
-                self.revision,
+                self.ignored_sync_revision.unwrap_or(self.revision),
                 self.ctx.clone(),
             ));
         }
@@ -165,8 +166,6 @@ impl App {
             return;
         };
         self.ignored_sync_revision = Some(snapshot.revision);
-        // Advance the known revision so the declined payload is not downloaded again.
-        self.revision = snapshot.revision;
     }
 
     pub(super) fn import_csv(&mut self) {
@@ -844,8 +843,23 @@ fn sensitive_connection_changes(prev: &Connection, next: &Connection) -> Vec<Str
     }
     note(&mut changes, "user", &prev.username, &next.username);
     note(&mut changes, "jump", &prev.ssh.jump, &next.ssh.jump);
-    note(&mut changes, "identity", &prev.ssh.identity, &next.ssh.identity);
-    note(&mut changes, "forwards", &prev.ssh.forwards, &next.ssh.forwards);
-    note(&mut changes, "gateway", &prev.rdp.gateway, &next.rdp.gateway);
+    note(
+        &mut changes,
+        "identity",
+        &prev.ssh.identity,
+        &next.ssh.identity,
+    );
+    note(
+        &mut changes,
+        "forwards",
+        &prev.ssh.forwards,
+        &next.ssh.forwards,
+    );
+    note(
+        &mut changes,
+        "gateway",
+        &prev.rdp.gateway,
+        &next.rdp.gateway,
+    );
     changes
 }

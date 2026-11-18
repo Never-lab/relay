@@ -2330,15 +2330,39 @@ fn shared_library_sync_waits_for_review() {
     assert_eq!(app.connections[0].host, "alpha.example");
     app.dismiss_library_sync();
     assert_eq!(app.ignored_sync_revision, Some(poisoned.revision));
-    assert_eq!(app.revision, poisoned.revision);
+    assert_eq!(app.revision, theirs.revision);
     assert_eq!(app.connections[0].host, "alpha.example");
     sync(&mut app);
-    assert!(app.pending_sync.is_none(), "dismissed revision must not reappear");
+    assert!(
+        app.pending_sync.is_none(),
+        "dismissed revision must not reappear"
+    );
+
+    // Saving from the retained list must not overwrite the teammate's newer revision.
+    let mut edited = app.connections.clone();
+    edited[1].notes = "local edit".into();
+    assert!(app.persist(edited));
+    while app.pending.is_some() {
+        std::thread::sleep(Duration::from_millis(10));
+        app.poll_storage();
+    }
+    assert!(
+        app.error
+            .as_deref()
+            .is_some_and(|error| error.contains("since your last refresh"))
+    );
+    let stored = database::start(location.clone(), 0, None, ctx.clone())
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.revision, poisoned.revision);
+    assert_eq!(stored.connections, poisoned.connections);
+    app.recovery = None;
 
     // Notes-only edits have no phishing surface and apply without a prompt.
     let mut notes = app.connections.clone();
     notes[1].notes = "rack 2".into();
-    save(app.revision, notes);
+    save(poisoned.revision, notes);
     sync(&mut app);
     assert!(app.pending_sync.is_none());
     assert_eq!(app.connections[1].notes, "rack 2");
