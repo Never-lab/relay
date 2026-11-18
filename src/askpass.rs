@@ -219,7 +219,7 @@ fn same(a: &[u8], b: &[u8]) -> bool {
 fn parent_pid(pid: u32) -> Option<u32> {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
         TH32CS_SNAPPROCESS,
     };
     unsafe {
@@ -366,14 +366,9 @@ mod ipc {
     }
 
     pub fn ask(path: &str, line: &[u8]) -> Result<Option<String>, String> {
-        let stream = std::os::unix::net::UnixStream::connect(Path::new(path))
-            .map_err(|e| e.to_string())?;
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .ok();
-        stream
-            .set_write_timeout(Some(Duration::from_secs(5)))
-            .ok();
+        let stream =
+            std::os::unix::net::UnixStream::connect(Path::new(path)).map_err(|e| e.to_string())?;
+        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
         use std::io::{BufRead, BufReader, Write};
         let mut stream = stream;
         stream.write_all(line).map_err(|e| e.to_string())?;
@@ -390,7 +385,7 @@ mod ipc {
 
     #[cfg(target_os = "linux")]
     fn peer_pid(stream: &UnixStream) -> Option<u32> {
-        stream.peer_cred().ok().map(|c| c.pid() as u32)
+        u32::try_from(stream.peer_cred().ok()?.pid()?).ok()
     }
 
     #[cfg(target_os = "macos")]
@@ -517,9 +512,7 @@ mod ipc {
             .build()
             .map_err(|e| e.to_string())?;
         runtime.block_on(async {
-            let mut client = ClientOptions::new()
-                .open(path)
-                .map_err(|e| e.to_string())?;
+            let mut client = ClientOptions::new().open(path).map_err(|e| e.to_string())?;
             client.write_all(line).await.map_err(|e| e.to_string())?;
             let mut read = tokio::io::BufReader::new(client);
             let mut reply = String::new();
@@ -569,6 +562,7 @@ mod tests {
     fn window(
         answer: Option<&'static str>,
         ssh_pid: Option<u32>,
+        delay: Duration,
     ) -> (String, std::sync::mpsc::Receiver<String>) {
         let (seen, questions) = std::sync::mpsc::channel();
         let (endpoint, ready) = std::sync::mpsc::channel();
@@ -589,6 +583,7 @@ mod tests {
                 while let Some(message) = incoming.recv().await {
                     if let Message::Ask(request) = message {
                         seen.send(request.text).unwrap();
+                        tokio::time::sleep(delay).await;
                         let _ = request.reply.send(answer.map(String::from));
                     }
                 }
@@ -599,7 +594,7 @@ mod tests {
 
     #[test]
     fn helpers_get_answers_from_the_window() {
-        let (endpoint, questions) = window(Some("hunter2"), None);
+        let (endpoint, questions) = window(Some("hunter2"), None, Duration::from_secs(6));
         assert_eq!(
             ask(&endpoint, "Password: ", "").unwrap().as_deref(),
             Some("hunter2")
@@ -609,16 +604,14 @@ mod tests {
 
     #[test]
     fn declining_and_wrong_secrets_answer_nothing() {
-        let (endpoint, questions) = window(None, None);
+        let (endpoint, questions) = window(None, None, Duration::ZERO);
         assert_eq!(ask(&endpoint, "Password: ", "").unwrap(), None);
         assert_eq!(questions.recv().unwrap(), "Password:");
         let (_secret, path) = parse_endpoint(&endpoint).unwrap();
         let forged = format!("{} {path}", "0".repeat(64));
         assert_eq!(ask(&forged, "Password: ", "").unwrap(), None);
         assert!(
-            questions
-                .recv_timeout(Duration::from_millis(300))
-                .is_err(),
+            questions.recv_timeout(Duration::from_millis(300)).is_err(),
             "a helper without the secret reached the window"
         );
         assert!(ask("not-a-secret /tmp/nope", "Password: ", "").is_err());
@@ -627,12 +620,10 @@ mod tests {
     #[test]
     fn helpers_from_other_parents_are_rejected() {
         // A pid that is not the parent of this test process.
-        let (endpoint, questions) = window(Some("hunter2"), Some(u32::MAX - 7));
+        let (endpoint, questions) = window(Some("hunter2"), Some(u32::MAX - 7), Duration::ZERO);
         assert_eq!(ask(&endpoint, "Password: ", "").unwrap(), None);
         assert!(
-            questions
-                .recv_timeout(Duration::from_millis(500))
-                .is_err(),
+            questions.recv_timeout(Duration::from_millis(500)).is_err(),
             "a helper whose parent is not ssh reached the window"
         );
     }
