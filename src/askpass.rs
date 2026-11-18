@@ -593,7 +593,7 @@ mod tests {
     }
 
     #[test]
-    fn helpers_get_answers_from_the_window() {
+    fn helpers_wait_for_a_delayed_answer_from_the_window() {
         let (endpoint, questions) = window(Some("hunter2"), None, Duration::from_secs(6));
         assert_eq!(
             ask(&endpoint, "Password: ", "").unwrap().as_deref(),
@@ -621,7 +621,8 @@ mod tests {
     fn helpers_from_other_parents_are_rejected() {
         // A pid that is not the parent of this test process.
         let (endpoint, questions) = window(Some("hunter2"), Some(u32::MAX - 7), Duration::ZERO);
-        assert_eq!(ask(&endpoint, "Password: ", "").unwrap(), None);
+        // Closing an unread socket can give the rejected helper either EOF or a reset.
+        assert!(!matches!(ask(&endpoint, "Password: ", ""), Ok(Some(_))));
         assert!(
             questions.recv_timeout(Duration::from_millis(500)).is_err(),
             "a helper whose parent is not ssh reached the window"
