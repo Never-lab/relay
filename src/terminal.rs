@@ -636,17 +636,30 @@ impl Terminal {
 
         let (cursor_row, cursor_col) = screen.cursor_position();
         let cursor_visible = !screen.hide_cursor() && scrolled == 0 && !self.ended;
-        let mode = Mode {
-            application_cursor: screen.application_cursor(),
-            bracketed_paste: screen.bracketed_paste(),
-        };
-        let selection_text = selection
-            .map(|(start, end)| screen.contents_between(start.0, start.1, end.0, end.1 + 1));
-        let screen_contents = if response.has_focus() && !self.ended {
-            Some(screen.contents())
-        } else {
-            None
-        };
+        let focused = response.has_focus();
+        let right_click = response.secondary_clicked() && !reporting;
+        if right_click {
+            response.request_focus();
+        }
+        let mut copy = right_click && selection.is_some();
+        if response.has_focus() && !self.ended {
+            let (keys, copy_key) = ui.input(|i| {
+                translate(
+                    &i.events,
+                    i.modifiers,
+                    Mode {
+                        application_cursor: screen.application_cursor(),
+                        bracketed_paste: screen.bracketed_paste(),
+                    },
+                )
+            });
+            input.extend(keys);
+            copy |= copy_key;
+        }
+        let copied = copy.then(|| match selection {
+            Some((start, end)) => screen.contents_between(start.0, start.1, end.0, end.1 + 1),
+            None => screen.contents(),
+        });
         // Copy the visible grid, then release the parser so output can process during paint.
         let mut cells = Vec::with_capacity(rows as usize * cols as usize);
         for row in 0..rows {
@@ -728,7 +741,6 @@ impl Terminal {
                 );
             }
         };
-        let focused = response.has_focus();
         let cell_at_grid = |row: u16, col: u16| -> Option<&vt100::Cell> {
             cells
                 .get(row as usize * cols as usize + col as usize)
@@ -853,30 +865,16 @@ impl Terminal {
             }
         }
 
-        if response.secondary_clicked() && !reporting {
-            response.request_focus();
-            match &selection_text {
-                Some(text) => {
-                    ui.ctx().copy_text(text.clone());
-                    self.selection = None;
-                }
-                None => ui
-                    .ctx()
-                    .send_viewport_cmd(egui::ViewportCommand::RequestPaste),
+        if right_click {
+            if selection.is_some() {
+                self.selection = None;
+            } else {
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
             }
         }
-        if response.has_focus() && !self.ended {
-            let (events, modifiers) = ui.input(|i| (i.events.clone(), i.modifiers));
-            let (keys, copy) = translate(&events, modifiers, mode);
-            input.extend(keys);
-            if copy {
-                ui.ctx().copy_text(
-                    selection_text
-                        .clone()
-                        .or(screen_contents)
-                        .unwrap_or_default(),
-                );
-            }
+        if let Some(text) = copied {
+            ui.ctx().copy_text(text);
         }
         if !input.is_empty() {
             // Typing returns to the live screen; brief re-lock after paint.
@@ -1545,7 +1543,7 @@ mod tests {
         );
     }
     #[test]
-    fn dragging_selects_and_ctrl_shift_c_copies_it() {
+    fn copy_uses_the_selection_or_the_whole_screen() {
         let quiet = if cfg!(windows) {
             "ping -n 10 127.0.0.1 >nul"
         } else {
@@ -1612,6 +1610,25 @@ mod tests {
         let screen = parser.lock().unwrap().screen().contents();
         assert!(screen.starts_with("hello world"), "{screen:?}");
         assert_eq!(copied, ["world\nsecond"]);
+
+        let right = |pressed| egui::Event::PointerButton {
+            pos: end,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(vec![right(true)], egui::Modifiers::NONE);
+        let output = frame(vec![right(false)], egui::Modifiers::NONE);
+        assert_eq!(
+            output.platform_output.commands,
+            [egui::OutputCommand::CopyText("world\nsecond".into())]
+        );
+
+        let output = frame(vec![egui::Event::Copy], shortcut);
+        assert_eq!(
+            output.platform_output.commands,
+            [egui::OutputCommand::CopyText(screen)]
+        );
     }
     /// A terminal running a quiet process, its parser for feeding it output, and a context.
     fn harness() -> (Terminal, Arc<Mutex<vt100::Parser<Replies>>>, egui::Context) {
