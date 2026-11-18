@@ -384,8 +384,7 @@ mod tests {
         let state: State = serde_json::from_str("{}").unwrap();
         assert!(!state.terminal.programs_copy);
         // An explicit opt-in is kept.
-        let state: State =
-            serde_json::from_str(r#"{"terminal":{"programs_copy":true}}"#).unwrap();
+        let state: State = serde_json::from_str(r#"{"terminal":{"programs_copy":true}}"#).unwrap();
         assert!(state.terminal.programs_copy);
     }
 }
